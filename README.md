@@ -110,6 +110,24 @@ make test       # go vet + сборка под windows/amd64
 
 Сборка проверена кросс-компиляцией из Linux/WSL (`GOOS=windows GOARCH=amd64`, `CGO_ENABLED=0`). Тяжёлых зависимостей нет: только стандартная библиотека + собственные биндинги Win32 в `internal/win`.
 
+## Релизы и CI
+
+GitHub Actions (`.github/workflows/build.yml`) на каждый push в `main` и на каждый тег `v*`:
+
+1. `gofmt -l` — гейт на форматирование;
+2. `GOOS=windows go vet -unsafeptr=false -composites=false ./...` (анализатор `unsafeptr` выключен осознанно: Win32-колбэки штатно передают данные сообщений через `uintptr`);
+3. `make build VERSION=<версия из тега>` — кросс-сборка `windows/amd64` с иконкой и манифестом;
+4. артефакт `yas-shotter-windows-amd64` в каждой сборке;
+5. для тега — публикация релиза с ассетом **`yas-shotter.exe`** (`gh release create`, при повторном прогоне `gh release upload --clobber`).
+
+Версия зашивается в бинарник из тега: `-X main.version=0.1.2`.
+
+```text
+git tag v0.1.3 && git push origin v0.1.3     # → CI собирает и публикует релиз
+```
+
+Готовые сборки: [Releases](../../releases).
+
 ## Структура
 
 ```text
