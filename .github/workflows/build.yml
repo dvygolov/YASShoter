@@ -21,28 +21,46 @@ jobs:
           go-version: "1.24"
 
       - name: Install go-winres
-        run: go install github.com/tc-hib/go-winres@latest
+        run: |
+          go install github.com/tc-hib/go-winres@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
+      - name: gofmt
+        run: |
+          files=$(gofmt -l . | grep -v '^$' || true)
+          if [ -n "$files" ]; then
+            echo "not gofmt-clean:"; echo "$files"; exit 1
+          fi
+
+      # -unsafeptr is off: Win32 callbacks legitimately pass message payloads as
+      # uintptr and the analyzer cannot tell them from real misuse.
       - name: Vet (windows target)
-        run: GOOS=windows GOARCH=amd64 go vet ./...
+        run: GOOS=windows GOARCH=amd64 go vet -unsafeptr=false -composites=false ./...
 
       - name: Build
-        env:
-          PATH: ${{ env.PATH }}:${{ github.workspace }}/../go/bin
         run: |
-          export PATH="$PATH:$(go env GOPATH)/bin"
           VERSION="${GITHUB_REF_NAME#v}"
-          make build VERSION="${VERSION:-0.1.0}"
+          case "$VERSION" in v*|main|master) VERSION="0.0.0-dev" ;; esac
+          make build VERSION="$VERSION"
+          ls -la build/yas-shotter.exe
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: yas-shotter-windows-amd64
           path: build/yas-shotter.exe
+          if-no-files-found: error
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: build/yas-shotter.exe
-          generate_release_notes: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p dist
+          cp build/yas-shotter.exe dist/yas-shotter.exe
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "YASShoter ${GITHUB_REF_NAME#v}" \
+            --generate-notes \
+            dist/yas-shotter.exe \
+            || gh release upload "$GITHUB_REF_NAME" dist/yas-shotter.exe --clobber

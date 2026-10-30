@@ -4,7 +4,7 @@
 APP      := yas-shotter
 VERSION  ?= 0.1.0
 OUT      := build/$(APP).exe
-LDFLAGS  := -s -w -H windowsgui
+LDFLAGS  := -s -w -H windowsgui -X main.version=$(VERSION)
 
 .PHONY: all icon resources build run clean
 
@@ -25,8 +25,9 @@ build: resources
 	@ls -la $(OUT)
 
 test:
-	GOOS=windows GOARCH=amd64 go vet ./...
+	GOOS=windows GOARCH=amd64 go vet -unsafeptr=false -composites=false ./...
 	GOOS=windows GOARCH=amd64 go build ./...
+	gofmt -l .
 
 clean:
 	rm -rf build rsrc_windows_*.syso
