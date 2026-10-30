@@ -6,7 +6,7 @@ import "runtime"
 
 //go:generate go run ./tools/genicon -out build/app.ico
 
-const version = "0.1.0"
+const version = "0.1.1"
 
 func main() {
 	// Win32 windows, hooks and the message loop must all live on one OS thread.

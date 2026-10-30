@@ -82,7 +82,7 @@ func (a *App) openEditor(region win.RECT) {
 	a.editor = ed
 
 	hwnd.Show(win.SW_SHOW)
-	hwnd.SetForeground()
+	win.ForceForeground(hwnd)
 
 	ed.tb = NewToolbar(ed)
 	ed.tb.Show()

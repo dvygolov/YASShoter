@@ -40,20 +40,23 @@ type Overlay struct {
 
 	font win.HFONT
 	dim  uint32
+
+	undimmed bool // first refresh has to dim the whole frozen screen
 }
 
+// newOverlay builds the overlay window once, hidden. Creating it during startup
+// instead of on the first capture keeps PrintScreen -> visible well under 100 ms.
 func newOverlay(a *App) *Overlay {
 	o := &Overlay{app: a, dim: uint32(a.cfg.DimAlpha)}
 	if o.dim < 60 || o.dim > 220 {
 		o.dim = 140
 	}
 	o.font = win.CreateFont(15, win.FW_SEMIBOLD, "Segoe UI")
-	o.windows = win.CapturableWindows(win.SelfPID(), a.screen)
 
 	name := "YASShoterOverlay"
 	win.RegisterClass(name, win.IDC_CROSS)
 	id := win.NewHandler(o.wndProc)
-	scr := a.screen
+	scr := win.VirtualScreen()
 	o.hwnd = win.CreateWindowEx(
 		uint32(win.WS_EX_TOPMOST|win.WS_EX_TOOLWINDOW),
 		name, appTitle, uint32(win.WS_POPUP),
@@ -61,17 +64,44 @@ func newOverlay(a *App) *Overlay {
 	return o
 }
 
+// fit makes sure the hidden window matches the current virtual screen.
+func (o *Overlay) fit() {
+	scr := o.app.screen
+	if r := o.hwnd.Rect(); r != scr {
+		o.hwnd.SetPos(win.HWND_TOPMOST, scr.Left, scr.Top, scr.W(), scr.H(),
+			win.SWP_NOACTIVATE|win.SWP_NOZORDER)
+	}
+}
+
 func (o *Overlay) show() {
 	if o.hwnd == 0 {
 		return
 	}
+	o.fit()
+	o.windows = win.CapturableWindows(win.SelfPID(), o.app.screen)
+	o.hover = win.RECT{}
+	o.hasHover = false
+	o.hoverTitle = ""
+	o.drawn = win.RECT{}
+	o.drawnLb = win.RECT{}
+	o.dragging = false
+	o.undimmed = true
 	o.hwnd.Show(win.SW_SHOW)
+	win.ForceForeground(o.hwnd)
 	o.updateHover(win.GetCursorPos())
 	o.refresh()
 	o.hwnd.Update()
 }
 
-func (o *Overlay) close() {
+// hide parks the window; the DIBs are owned by App and released right away.
+func (o *Overlay) hide() {
+	if o.hwnd != 0 {
+		o.hwnd.Show(win.SW_HIDE)
+	}
+}
+
+func (o *Overlay) destroy() {
+	o.hide()
 	if o.hwnd != 0 {
 		h := o.hwnd
 		o.hwnd = 0
@@ -146,6 +176,10 @@ func (o *Overlay) refresh() {
 	}
 
 	dirty := win.Inflate(win.Union(win.Union(o.drawn, target), o.drawnLb), 4)
+	if o.undimmed {
+		dirty = win.RECT{0, 0, o.app.screen.W(), o.app.screen.H()}
+		o.undimmed = false
+	}
 	if dirty.Empty() {
 		return
 	}
@@ -215,9 +249,7 @@ func (o *Overlay) finish(sel win.RECT) {
 		Right:  sel.Right + o.app.screen.Left,
 		Bottom: sel.Bottom + o.app.screen.Top,
 	}
-	if o.hwnd != 0 {
-		o.hwnd.Show(win.SW_HIDE)
-	}
+	o.hide()
 	o.app.startEditor(screen)
 }
 

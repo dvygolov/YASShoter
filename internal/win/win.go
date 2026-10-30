@@ -223,6 +223,39 @@ func GetWindowLongPtr(h HWND, index uintptr) uintptr {
 	return r
 }
 
+var (
+	pAttachThreadInput = dllUser32.NewProc("AttachThreadInput")
+	pSetFocus          = dllUser32.NewProc("SetFocus")
+	pBringWindowToTop  = dllUser32.NewProc("BringWindowToTop")
+	pGetCurrentThread  = dllKernel32.NewProc("GetCurrentThreadId")
+)
+
+// ForceForeground activates our window even when another process owns the
+// foreground: Windows only allows SetForegroundWindow for the process that got
+// the last input, and a message loop hop can lose that privilege. Attaching to
+// the current foreground thread's input queue makes the call legal.
+func ForceForeground(h HWND) {
+	if h == 0 || GetForegroundWindow() == h {
+		pSetFocus.Call(uintptr(h))
+		return
+	}
+	fg := GetForegroundWindow()
+	tidFg, _, _ := pGetWindowThreadProcessId.Call(uintptr(fg))
+	tidCur, _, _ := pGetCurrentThread.Call()
+	attached := false
+	if tidFg != 0 && tidFg != tidCur {
+		if r, _, _ := pAttachThreadInput.Call(tidCur, tidFg, 1); r != 0 {
+			attached = true
+		}
+	}
+	pBringWindowToTop.Call(uintptr(h))
+	pSetForegroundWindow.Call(uintptr(h))
+	pSetFocus.Call(uintptr(h))
+	if attached {
+		pAttachThreadInput.Call(tidCur, tidFg, 0)
+	}
+}
+
 func GetForegroundWindow() HWND {
 	r, _, _ := pGetForegroundWindow.Call()
 	return HWND(r)

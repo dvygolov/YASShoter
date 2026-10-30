@@ -398,3 +398,10 @@ func equalFold(a, b string) bool {
 	}
 	return true
 }
+
+// TrimWorkingSet asks the memory manager to page out what we just freed, so the
+// process does not look like it holds the whole frozen frame after a capture.
+func TrimWorkingSet() {
+	proc, _, _ := dllKernel32.NewProc("GetCurrentProcess").Call()
+	dllKernel32.NewProc("SetProcessWorkingSetSize").Call(proc, ^uintptr(0), ^uintptr(0))
+}

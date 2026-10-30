@@ -79,6 +79,10 @@ func runApp() {
 	app.registerHotkeys()
 
 	app.taskbarMsg = win.RegisterWindowMessage("TaskbarCreated")
+	// pre-create the overlay so the first PrintScreen is instant too
+	app.overlay = newOverlay(app)
+	logf("overlay window pre-created")
+
 	app.tray = win.NewTray(hwnd, app.icon, appTitle+" — PrintScreen: захват", win.WM_TRAYICON)
 	if !cfg.TrayPromoted {
 		// give the shell a moment to create the NotifyIconSettings entry, then
@@ -269,14 +273,11 @@ func (a *App) startCapture() {
 	}
 	a.frame = frame
 
-	alpha := uint32(a.cfg.DimAlpha)
-	if alpha < 60 || alpha > 220 {
-		alpha = 140
-	}
-	frame.Dim(src, win.RECT{0, 0, screen.W(), screen.H()}, alpha)
 	t2 := win.GetTickCount()
 
-	a.overlay = newOverlay(a)
+	if a.overlay == nil {
+		a.overlay = newOverlay(a)
+	}
 	a.overlay.show()
 	t3 := win.GetTickCount()
 	logf("timings: capture=%dms dim=%dms overlay=%dms (total %dms)", t1-t0, t2-t1, t3-t2, t3-t0)
@@ -286,8 +287,7 @@ func (a *App) startCapture() {
 // afterCapture releases every heavy buffer: the resident footprint stays small.
 func (a *App) afterCapture() {
 	if a.overlay != nil {
-		a.overlay.close()
-		a.overlay = nil
+		a.overlay.hide()
 	}
 	if a.src != nil {
 		a.src.Close()
@@ -298,6 +298,7 @@ func (a *App) afterCapture() {
 		a.frame = nil
 	}
 	a.active = false
+	win.TrimWorkingSet()
 }
 
 func (a *App) startEditor(region win.RECT) {
