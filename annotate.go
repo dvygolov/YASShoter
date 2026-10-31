@@ -72,7 +72,7 @@ func drawShape(d *win.Dib, s *Shape, font win.HFONT) {
 	case ToolPencil:
 		d.Polyline(s.Pts, s.Width, s.Color)
 	case ToolNumber:
-		rad := 10 + s.Width*1.2
+		rad := s.Width*2.4 + 6
 		d.FillCircle(s.X0, s.Y0, rad, s.Color)
 		txt := itoa(int64(s.Num))
 		box := win.RECT{

@@ -433,6 +433,8 @@ const (
 
 const (
 	MB_OK              = 0x00000000
+	MB_OKCANCEL        = 0x00000001
+	MB_YESNO           = 0x00000004
 	MB_ICONERROR       = 0x00000010
 	MB_ICONINFORMATION = 0x00000040
 	MB_TOPMOST         = 0x00040000

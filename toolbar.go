@@ -8,11 +8,17 @@ import (
 	"github.com/dvygolov/yasshoter/internal/win"
 )
 
+// Design values are given for 96 DPI (100% scaling) and multiplied by the
+// monitor scale factor, so the strip keeps its physical size on 125/150/200%.
 const (
-	tbH   = 42
-	tbPad = 8
-	tbBtn = 30
-	tbGap = 4
+	tbDesignH     = 42
+	tbDesignPad   = 8
+	tbDesignBtn   = 30
+	tbDesignGap   = 4
+	tbDesignWBtn  = 26
+	tbDesignHint  = 214
+	tbDesignFont  = 14
+	tbDesignSmall = 13
 )
 
 type tbKind int
@@ -34,7 +40,7 @@ const (
 type tbButton struct {
 	kind  tbKind
 	tool  ToolKind
-	width float64
+	width float64 // logical (96 DPI) thickness
 	color uint32
 	act   int
 	rect  win.RECT
@@ -42,10 +48,17 @@ type tbButton struct {
 
 // Toolbar is the floating, never-activating tool strip below the capture area.
 type Toolbar struct {
-	ed    *Editor
-	hwnd  win.HWND
-	buf   *win.Dib
-	w, h  int32
+	ed   *Editor
+	hwnd win.HWND
+	buf  *win.Dib
+	w, h int32
+
+	s   float64 // dpi / 96
+	dpi uint32
+	btn int32
+	pad int32
+	gap int32
+
 	btns  []tbButton
 	seps  []int32
 	hover int
@@ -96,9 +109,19 @@ func formatColor(c uint32) string {
 }
 
 func NewToolbar(ed *Editor) *Toolbar {
-	tb := &Toolbar{ed: ed, h: tbH, hover: -1}
-	tb.font = win.CreateFont(14, win.FW_SEMIBOLD, "Segoe UI")
-	tb.small = win.CreateFont(13, win.FW_NORMAL, "Segoe UI")
+	s := win.ScaleFactor(ed.dpi)
+	tb := &Toolbar{
+		ed:    ed,
+		s:     s,
+		dpi:   ed.dpi,
+		h:     win.Scale(tbDesignH, ed.dpi),
+		btn:   win.Scale(tbDesignBtn, ed.dpi),
+		pad:   win.Scale(tbDesignPad, ed.dpi),
+		gap:   win.Scale(tbDesignGap, ed.dpi),
+		hover: -1,
+	}
+	tb.font = win.CreateFont(win.Scale(tbDesignFont, ed.dpi), win.FW_SEMIBOLD, "Segoe UI")
+	tb.small = win.CreateFont(win.Scale(tbDesignSmall, ed.dpi), win.FW_NORMAL, "Segoe UI")
 	tb.layout()
 	buf, err := win.NewDib(tb.w, tb.h)
 	if err != nil {
@@ -113,40 +136,41 @@ func NewToolbar(ed *Editor) *Toolbar {
 		name, appTitle, uint32(win.WS_POPUP),
 		0, 0, tb.w, tb.h, 0, 0, uintptr(id))
 	tb.compose()
+	logf("toolbar: dpi=%d scale=%.2f size=%dx%d btn=%d font=%d", tb.dpi, tb.s, tb.w, tb.h, tb.btn, win.Scale(tbDesignFont, tb.dpi))
 	return tb
 }
 
 func (tb *Toolbar) layout() {
-	x := int32(tbPad)
-	y := (int32(tbH) - tbBtn) / 2
+	x := tb.pad
+	y := (tb.h - tb.btn) / 2
 	tb.seps = tb.seps[:0]
 	sep := func() {
-		tb.seps = append(tb.seps, x+3)
-		x += 7
+		tb.seps = append(tb.seps, x+tb.gap)
+		x += tb.gap * 2
 	}
 	add := func(b tbButton, w int32) {
-		b.rect = win.RECT{Left: x, Top: y, Right: x + w, Bottom: y + tbBtn}
+		b.rect = win.RECT{Left: x, Top: y, Right: x + w, Bottom: y + tb.btn}
 		tb.btns = append(tb.btns, b)
-		x += w + tbGap
+		x += w + tb.gap
 	}
 	tb.btns = tb.btns[:0]
 	for _, t := range []ToolKind{ToolArrow, ToolRect, ToolEllipse, ToolPencil, ToolNumber} {
-		add(tbButton{kind: tbTool, tool: t}, tbBtn)
+		add(tbButton{kind: tbTool, tool: t}, tb.btn)
 	}
 	sep()
 	for _, wv := range widths {
-		add(tbButton{kind: tbWidth, width: wv}, 26)
+		add(tbButton{kind: tbWidth, width: wv}, win.Scale(tbDesignWBtn, tb.dpi))
 	}
 	sep()
 	for _, c := range palette {
-		add(tbButton{kind: tbColor, color: c}, 26)
+		add(tbButton{kind: tbColor, color: c}, win.Scale(tbDesignWBtn, tb.dpi))
 	}
 	sep()
 	for _, a := range []int{actUndo, actCopy, actSave, actCancel} {
-		add(tbButton{kind: tbAction, act: a}, tbBtn)
+		add(tbButton{kind: tbAction, act: a}, tb.btn)
 	}
-	x += 8
-	tb.w = x + 210 + 6
+	x += tb.gap
+	tb.w = x + win.Scale(tbDesignHint, tb.dpi) + tb.pad
 }
 
 func (tb *Toolbar) compose() {
@@ -161,7 +185,7 @@ func (tb *Toolbar) compose() {
 		case tbTool:
 			active = ed.tool == btn.tool
 		case tbWidth:
-			active = ed.width == btn.width
+			active = ed.widthLogical == btn.width
 		case tbColor:
 			active = ed.color == btn.color
 		}
@@ -173,11 +197,12 @@ func (tb *Toolbar) compose() {
 		}
 		tb.drawButtonIcon(btn, r, active)
 	}
+	sepTop := win.Scale(9, tb.dpi)
 	for _, sx := range tb.seps {
-		b.FillRectColor(win.RECT{sx, 9, sx + 1, tbH - 9}, 0x3B4250)
+		b.FillRectColor(win.RECT{sx, sepTop, sx + 1, tb.h - sepTop}, 0x3B4250)
 	}
 	// hint text
-	hr := win.RECT{Left: tb.w - 214, Top: 0, Right: tb.w - 8, Bottom: tbH}
+	hr := win.RECT{Left: tb.w - win.Scale(tbDesignHint, tb.dpi) - tb.pad, Top: 0, Right: tb.w - tb.pad, Bottom: tb.h}
 	txt := "Enter — сохранить · Esc — отмена"
 	if tb.msg != "" {
 		txt = tb.msg
@@ -187,6 +212,7 @@ func (tb *Toolbar) compose() {
 
 func (tb *Toolbar) drawButtonIcon(btn tbButton, r win.RECT, active bool) {
 	b := tb.buf
+	s := tb.s
 	var col uint32 = 0xE8EDF5
 	if active {
 		col = 0xFFFFFF
@@ -195,38 +221,38 @@ func (tb *Toolbar) drawButtonIcon(btn tbButton, r win.RECT, active bool) {
 	cy := (r.Top + r.Bottom) / 2
 	fx := float64(cx)
 	fy := float64(cy)
+	stroke := 2.2 * s
 	switch btn.kind {
 	case tbTool:
 		switch btn.tool {
 		case ToolArrow:
-			s := Shape{Tool: ToolArrow, Color: col, Width: 2.6, X0: fx - 7, Y0: fy + 7, X1: fx + 7, Y1: fy - 7}
-			drawArrow(b, &s)
+			sd := Shape{Tool: ToolArrow, Color: col, Width: 2.6 * s, X0: fx - 7*s, Y0: fy + 7*s, X1: fx + 7*s, Y1: fy - 7*s}
+			drawArrow(b, &sd)
 		case ToolRect:
-			b.RectOutline(fx-7, fy-5.5, fx+7, fy+5.5, 2.2, col)
+			b.RectOutline(fx-7*s, fy-5.5*s, fx+7*s, fy+5.5*s, stroke, col)
 		case ToolEllipse:
-			b.EllipseOutline(fx, fy, 7, 5.5, 2.2, col)
+			b.EllipseOutline(fx, fy, 7*s, 5.5*s, stroke, col)
 		case ToolPencil:
 			b.Polyline([]float64{
-				fx - 7, fy + 6,
-				fx - 3, fy - 2,
-				fx + 1, fy + 4,
-				fx + 7, fy - 6,
-			}, 2.2, col)
+				fx - 7*s, fy + 6*s,
+				fx - 3*s, fy - 2*s,
+				fx + 1*s, fy + 4*s,
+				fx + 7*s, fy - 6*s,
+			}, stroke, col)
 		case ToolNumber:
-			b.FillCircle(fx, fy, 7, col)
-			box := win.RECT{int32(fx) - 7, int32(fy) - 7, int32(fx) + 7, int32(fy) + 7}
+			rad := 7 * s
+			b.FillCircle(fx, fy, rad, col)
+			box := win.RECT{int32(fx - rad), int32(fy - rad), int32(fx + rad), int32(fy + rad)}
 			b.TextOut("1", &box, 0x20242B, tb.font, win.DT_CENTER|win.DT_VCENTER|win.DT_SINGLELINE|win.DT_NOPREFIX)
 		}
 	case tbWidth:
-		b.FillCircle(fx, fy, btn.width/2, col)
-		if !active {
-			b.FillCircle(fx, fy, btn.width/2, 0xE8EDF5)
-		}
+		b.FillCircle(fx, fy, btn.width*s/2, col)
 	case tbColor:
-		rr := win.RECT{int32(fx) - 8, int32(fy) - 8, int32(fx) + 8, int32(fy) + 8}
+		half := 8 * s
+		rr := win.RECT{int32(fx - half), int32(fy - half), int32(fx + half), int32(fy + half)}
 		b.FillRectColor(rr, btn.color)
 		if active {
-			b.StrokeRect(win.RECT{rr.Left - 2, rr.Top - 2, rr.Right + 2, rr.Bottom + 2}, 1, 0xFFFFFF)
+			b.StrokeRect(win.RECT{rr.Left - win.Scale(2, tb.dpi), rr.Top - win.Scale(2, tb.dpi), rr.Right + win.Scale(2, tb.dpi), rr.Bottom + win.Scale(2, tb.dpi)}, 1, 0xFFFFFF)
 		} else {
 			b.StrokeRect(rr, 1, 0x11151A)
 		}
@@ -235,21 +261,21 @@ func (tb *Toolbar) drawButtonIcon(btn tbButton, r win.RECT, active bool) {
 		case actUndo:
 			pts := make([]float64, 0, 24)
 			for a := 205.0; a <= 335.0; a += 13 {
-				rad := a * 3.14159265 / 180
-				pts = append(pts, fx+5.5*math.Cos(rad), fy+5.5*math.Sin(rad))
+				rad := a * math.Pi / 180
+				pts = append(pts, fx+5.5*s*math.Cos(rad), fy+5.5*s*math.Sin(rad))
 			}
-			b.Polyline(pts, 2.1, col)
-			hx := fx + 5.5*math.Cos(205*3.14159265/180)
-			hy := fy + 5.5*math.Sin(205*3.14159265/180)
-			b.FillTriangle(hx-3.5, hy+1.5, hx+3.0, hy-3.0, hx+3.0, hy+4.0, col)
+			b.Polyline(pts, 2.1*s, col)
+			hx := fx + 5.5*s*math.Cos(205*math.Pi/180)
+			hy := fy + 5.5*s*math.Sin(205*math.Pi/180)
+			b.FillTriangle(hx-3.5*s, hy+1.5*s, hx+3.0*s, hy-3.0*s, hx+3.0*s, hy+4.0*s, col)
 		case actCopy:
-			b.RectOutline(fx-6, fy-6, fx+3, fy+3, 2, col)
-			b.RectOutline(fx-2, fy-2, fx+7, fy+7, 2, col)
+			b.RectOutline(fx-6*s, fy-6*s, fx+3*s, fy+3*s, 2*s, col)
+			b.RectOutline(fx-2*s, fy-2*s, fx+7*s, fy+7*s, 2*s, col)
 		case actSave:
-			b.Polyline([]float64{fx - 6, fy, fx - 2, fy + 5, fx + 7, fy - 6}, 2.6, 0x34C759)
+			b.Polyline([]float64{fx - 6*s, fy, fx - 2*s, fy + 5*s, fx + 7*s, fy - 6*s}, 2.6*s, 0x34C759)
 		case actCancel:
-			b.Line(fx-6, fy-6, fx+6, fy+6, 2.4, 0xFF5C57)
-			b.Line(fx+6, fy-6, fx-6, fy+6, 2.4, 0xFF5C57)
+			b.Line(fx-6*s, fy-6*s, fx+6*s, fy+6*s, 2.4*s, 0xFF5C57)
+			b.Line(fx+6*s, fy-6*s, fx-6*s, fy+6*s, 2.4*s, 0xFF5C57)
 		}
 	}
 }
@@ -269,12 +295,12 @@ func (tb *Toolbar) place() {
 	r := tb.ed.rect
 	scr := win.VirtualScreen()
 	x := r.Left + (r.W()-tb.w)/2
-	y := r.Bottom + 10
+	y := r.Bottom + tb.gap*3
 	if y+tb.h > scr.Bottom-2 {
-		y = r.Top - tb.h - 10
+		y = r.Top - tb.h - tb.gap*3
 	}
 	if y < scr.Top+2 {
-		y = r.Bottom - tb.h - 12
+		y = r.Bottom - tb.h - tb.gap*4
 		if y < scr.Top+2 {
 			y = scr.Top + 2
 		}
@@ -300,9 +326,11 @@ func (tb *Toolbar) Close() {
 	}
 	if tb.font != 0 {
 		win.DeleteObject(win.HGDIOBJ(tb.font))
+		tb.font = 0
 	}
 	if tb.small != 0 {
 		win.DeleteObject(win.HGDIOBJ(tb.small))
+		tb.small = 0
 	}
 }
 
@@ -343,8 +371,8 @@ func (tb *Toolbar) wndProc(hwnd win.HWND, msg uint32, wp, lp uintptr) uintptr {
 		return 1
 	case win.WM_MOUSEMOVE:
 		p := win.GetCursorPos()
-		cp := win.POINT{p.X - tb.rectLeft(), p.Y - tb.rectTop()}
-		h := tb.hit(cp)
+		r := hwnd.Rect()
+		h := tb.hit(win.POINT{X: p.X - r.Left, Y: p.Y - r.Top})
 		if h != tb.hover {
 			tb.hover = h
 			tb.Invalidate()
@@ -357,8 +385,6 @@ func (tb *Toolbar) wndProc(hwnd win.HWND, msg uint32, wp, lp uintptr) uintptr {
 			tb.click(tb.btns[i])
 		}
 		return 0
-	case win.WM_LBUTTONUP:
-		return 0
 	case win.WM_KEYDOWN:
 		// forward to the editor so shortcuts keep working while hovering the bar
 		if tb.ed.hwnd != 0 {
@@ -367,16 +393,6 @@ func (tb *Toolbar) wndProc(hwnd win.HWND, msg uint32, wp, lp uintptr) uintptr {
 		return 0
 	}
 	return win.DefWindowProc(hwnd, msg, wp, lp)
-}
-
-func (tb *Toolbar) rectLeft() int32 {
-	r := tb.hwnd.Rect()
-	return r.Left
-}
-
-func (tb *Toolbar) rectTop() int32 {
-	r := tb.hwnd.Rect()
-	return r.Top
 }
 
 func (tb *Toolbar) click(b tbButton) {

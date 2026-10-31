@@ -38,8 +38,12 @@ type Overlay struct {
 	drawn   win.RECT // highlight currently baked into the frame
 	drawnLb win.RECT // size label currently baked into the frame
 
-	font win.HFONT
-	dim  uint32
+	font    win.HFONT
+	fontDpi uint32
+	dpi     uint32
+	s       float64
+	stroke  int32
+	dim     uint32
 
 	undimmed bool // first refresh has to dim the whole frozen screen
 }
@@ -51,7 +55,9 @@ func newOverlay(a *App) *Overlay {
 	if o.dim < 60 || o.dim > 220 {
 		o.dim = 140
 	}
-	o.font = win.CreateFont(15, win.FW_SEMIBOLD, "Segoe UI")
+	o.dpi = win.SystemDPI()
+	o.s = win.ScaleFactor(o.dpi)
+	o.setFontDpi(o.dpi)
 
 	name := "YASShoterOverlay"
 	win.RegisterClass(name, win.IDC_CROSS)
@@ -78,6 +84,15 @@ func (o *Overlay) show() {
 		return
 	}
 	o.fit()
+	// the overlay spans every monitor, so the label follows the one under the cursor
+	o.dpi = win.DpiForPoint(win.GetCursorPos())
+	o.s = win.ScaleFactor(o.dpi)
+	o.stroke = win.Scale(1, o.dpi)
+	if o.stroke < 1 {
+		o.stroke = 1
+	}
+	o.setFontDpi(o.dpi)
+	logf("overlay: dpi=%d scale=%.2f", o.dpi, o.s)
 	o.windows = win.CapturableWindows(win.SelfPID(), o.app.screen)
 	o.hover = win.RECT{}
 	o.hasHover = false
@@ -91,6 +106,18 @@ func (o *Overlay) show() {
 	o.updateHover(win.GetCursorPos())
 	o.refresh()
 	o.hwnd.Update()
+}
+
+// setFontDpi keeps the size label readable on any monitor scale.
+func (o *Overlay) setFontDpi(dpi uint32) {
+	if o.fontDpi == dpi && o.font != 0 {
+		return
+	}
+	if o.font != 0 {
+		win.DeleteObject(win.HGDIOBJ(o.font))
+	}
+	o.fontDpi = dpi
+	o.font = win.CreateFont(win.Scale(15, dpi), win.FW_SEMIBOLD, "Segoe UI")
 }
 
 // hide parks the window; the DIBs are owned by App and released right away.
@@ -191,10 +218,10 @@ func (o *Overlay) refresh() {
 		if o.dragging {
 			// bright, unmodified pixels: what will actually be captured
 			frame.CopyRegion(src, target)
-			frame.StrokeRect(target, 1, selColor)
+			frame.StrokeRect(target, o.stroke+1, selColor)
 		} else {
-			frame.StrokeRect(win.Inflate(target, -1), 1, hoverEdge)
-			frame.StrokeRect(win.Inflate(target, -2), 1, 0x1D4ED8)
+			frame.StrokeRect(win.Inflate(target, -1), o.stroke, hoverEdge)
+			frame.StrokeRect(win.Inflate(target, -1-o.stroke), o.stroke, 0x1D4ED8)
 		}
 		o.drawnLb = o.drawLabel(target, o.dragging)
 	}
@@ -215,15 +242,17 @@ func (o *Overlay) drawLabel(target win.RECT, dragging bool) win.RECT {
 	sz := win.TextExtent(o.app.frame.DC, text)
 	win.SelectObject(o.app.frame.DC, old)
 
-	bw := sz.CX + 20
-	if bw > o.app.screen.W()-8 {
-		bw = o.app.screen.W() - 8
+	padX := win.Scale(10, o.dpi)
+	bw := sz.CX + padX*2
+	if bw > o.app.screen.W()-win.Scale(8, o.dpi) {
+		bw = o.app.screen.W() - win.Scale(8, o.dpi)
 	}
-	bh := int32(24)
+	bh := win.Scale(24, o.dpi)
+	gap := win.Scale(8, o.dpi)
 	x := target.Right - bw
-	y := target.Bottom + 8
+	y := target.Bottom + gap
 	if y+bh > o.app.screen.H()-2 {
-		y = target.Bottom - bh - 8
+		y = target.Bottom - bh - gap
 	}
 	if x < 2 {
 		x = 2

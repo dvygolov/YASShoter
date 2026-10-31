@@ -28,6 +28,10 @@ type Config struct {
 	DisableSnipping  bool    `json:"disableSnippingToolPrintScreen"`
 	DimAlpha         int     `json:"dimAlpha"`
 	TrayPromoted     bool    `json:"trayPromoted"`
+	// AutoUpdate: "auto" — скачивать и обновляться самому, "notify" — только
+	// сообщать о новой версии, "off" — не проверять.
+	AutoUpdate       string `json:"autoUpdate"`
+	UpdateCheckHours int    `json:"updateCheckHours"`
 
 	path string
 }
@@ -47,6 +51,8 @@ func defaultConfig() *Config {
 		CopyToClipboard:  true,
 		DisableSnipping:  false,
 		DimAlpha:         140,
+		AutoUpdate:       "auto",
+		UpdateCheckHours: 6,
 	}
 }
 

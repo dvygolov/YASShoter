@@ -25,11 +25,13 @@ type Editor struct {
 	drawing bool
 	moved   bool
 
-	tool    ToolKind
-	color   uint32
-	width   float64
-	nextNum int
-	font    win.HFONT
+	tool         ToolKind
+	color        uint32
+	widthLogical float64 // 96 DPI units, shown in the toolbar
+	nextNum      int
+	dpi          uint32
+	s            float64
+	font         win.HFONT
 
 	tb *Toolbar
 }
@@ -39,14 +41,19 @@ func (a *App) openEditor(region win.RECT) {
 		app:     a,
 		tool:    ToolArrow,
 		color:   parseColor(a.cfg.Color, 0xFF3B30),
-		width:   a.cfg.Thickness,
 		nextNum: 1,
-	}
-	if ed.width < 2 {
-		ed.width = 4
 	}
 	w := region.W()
 	h := region.H()
+
+	// The capture is in physical pixels; the toolbar and the pen follow the
+	// monitor scale so nothing looks tiny on a 150% laptop display.
+	ed.dpi = win.DpiForPoint(win.POINT{X: region.Left + w/2, Y: region.Top + h/2})
+	ed.s = win.ScaleFactor(ed.dpi)
+	ed.widthLogical = a.cfg.Thickness
+	if ed.widthLogical < 1 {
+		ed.widthLogical = 4
+	}
 
 	img, err := win.NewDib(w, h)
 	if err != nil {
@@ -61,10 +68,11 @@ func (a *App) openEditor(region win.RECT) {
 	// the size label, which must never end up in the saved image
 	img.Blit(a.src, region.Left-a.screen.Left, region.Top-a.screen.Top, w, h, 0, 0)
 
+	logf("editor: dpi=%d scale=%.2f region=%dx%d thickness=%.1f", ed.dpi, ed.s, w, h, ed.widthLogical*ed.s)
 	ed.img = img
 	ed.buf = buf
 	ed.w, ed.h = w, h
-	ed.font = win.CreateFont(16, win.FW_BOLD, "Segoe UI")
+	ed.font = win.CreateFont(win.Scale(16, ed.dpi), win.FW_BOLD, "Segoe UI")
 
 	name := "YASShoterEditor"
 	win.RegisterClass(name, 0)
@@ -219,9 +227,9 @@ func (ed *Editor) onKey(vk uint32) {
 	case win.VK_5:
 		ed.setTool(ToolNumber)
 	case win.VK_OEM_PLUS:
-		ed.setWidth(nextWidth(ed.width, 1))
+		ed.setWidth(nextWidth(ed.widthLogical, 1))
 	case win.VK_OEM_MINUS:
-		ed.setWidth(nextWidth(ed.width, -1))
+		ed.setWidth(nextWidth(ed.widthLogical, -1))
 	case win.VK_BACK:
 		ed.undo()
 	}
@@ -235,7 +243,7 @@ func (ed *Editor) setTool(t ToolKind) {
 }
 
 func (ed *Editor) setWidth(w float64) {
-	ed.width = w
+	ed.widthLogical = w
 	ed.app.cfg.Thickness = w
 	ed.app.cfg.save()
 	if ed.tb != nil {
@@ -270,13 +278,13 @@ func (ed *Editor) undo() {
 func (ed *Editor) onDown(p win.POINT) {
 	x, y := float64(p.X), float64(p.Y)
 	if ed.tool == ToolNumber {
-		s := Shape{Tool: ToolNumber, Color: ed.color, Width: ed.width, X0: x, Y0: y, Num: ed.nextNum}
+		s := Shape{Tool: ToolNumber, Color: ed.color, Width: ed.widthLogical * ed.s, X0: x, Y0: y, Num: ed.nextNum}
 		ed.nextNum++
 		ed.shapes = append(ed.shapes, s)
 		ed.invalidateAll()
 		return
 	}
-	ed.cur = &Shape{Tool: ed.tool, Color: ed.color, Width: ed.width, X0: x, Y0: y, X1: x, Y1: y}
+	ed.cur = &Shape{Tool: ed.tool, Color: ed.color, Width: ed.widthLogical * ed.s, X0: x, Y0: y, X1: x, Y1: y}
 	if ed.tool == ToolPencil {
 		ed.cur.Pts = append(ed.cur.Pts, x, y)
 	}

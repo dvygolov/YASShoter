@@ -30,31 +30,46 @@ type App struct {
 	editor  *Editor
 	active  bool
 
-	taskbarMsg  uint32
-	hotkeyID    int32
-	altHotkeyID int32
-	hotkeyMods  uint32
-	hotkeyVK    uint32
+	taskbarMsg    uint32
+	pendingUpdate bool
+	hotkeyID      int32
+	altHotkeyID   int32
+	hotkeyMods    uint32
+	hotkeyVK      uint32
 }
 
 const (
-	cmdCapture = 1
-	cmdFolder  = 2
-	cmdConfig  = 3
-	cmdAuto    = 4
-	cmdQuit    = 5
+	cmdCapture  = 1
+	cmdFolder   = 2
+	cmdConfig   = 3
+	cmdAuto     = 4
+	cmdQuit     = 5
+	cmdCheckUpd = 6
+	cmdDoUpdate = 7
 )
 
 func runApp() {
 	win.SetProcessDPIAware()
 	cfg := loadConfig()
 	app := &App{cfg: cfg}
+	cleanupOldBinary()
 
-	// one instance only: two of them would fight for the same hotkey
+	// one instance only: two of them would fight for the same hotkey. A short
+	// retry window lets a self-update relaunch land while the old process exits.
 	if h, err := win.CreateMutexAndCheck(appName + "_single_instance"); err != nil {
 		_ = h
-		logf("another instance is already running, exiting")
-		return
+		ok := false
+		for i := 0; i < 30; i++ {
+			win.Sleep(100)
+			if _, err2 := win.CreateMutexAndCheck(appName + "_single_instance"); err2 == nil {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			logf("another instance is already running, exiting")
+			return
+		}
 	}
 
 	if cfg.AutoStart {
@@ -84,6 +99,11 @@ func runApp() {
 	logf("overlay window pre-created")
 
 	app.tray = win.NewTray(hwnd, app.icon, appTitle+" — PrintScreen: захват", win.WM_TRAYICON)
+	app.startUpdateLoop()
+
+	if demoEditorEnabled() {
+		app.openDemoEditor()
+	}
 	if !cfg.TrayPromoted {
 		// give the shell a moment to create the NotifyIconSettings entry, then
 		// pin the icon to the taskbar (Windows 11 hides new icons by default)
@@ -174,6 +194,14 @@ func (a *App) wndProc(hwnd win.HWND, msg uint32, wp, lp uintptr) uintptr {
 		a.startCapture()
 		return 0
 	case win.WM_TIMER:
+		if wp == 2 {
+			win.KillTimer(hwnd, 2)
+			a.requestUpdateCheck(false)
+			win.SetTimer(hwnd, 3, uint32(a.updateInterval()/time.Millisecond))
+		}
+		if wp == 3 {
+			a.requestUpdateCheck(false)
+		}
 		if wp == 1 {
 			win.KillTimer(hwnd, 1)
 			exe := win.ExePath()
@@ -196,6 +224,14 @@ func (a *App) wndProc(hwnd win.HWND, msg uint32, wp, lp uintptr) uintptr {
 		case win.WM_RBUTTONUP, win.WM_CONTEXTMENU:
 			a.showTrayMenu()
 		}
+		return 0
+	case umUpdateBusy:
+		return 0
+	case umUpdateReady:
+		a.onUpdateReady()
+		return 0
+	case umUpdateFailed:
+		a.onUpdateFailed()
 		return 0
 	case a.taskbarMsg:
 		// explorer restarted: the tray icon has to be registered again
@@ -221,6 +257,14 @@ func (a *App) showTrayMenu() {
 	m.Add(cmdConfig, "Настройки (config.json)", false)
 	m.Add(cmdAuto, "Автозапуск при входе", a.cfg.AutoStart)
 	m.Separator()
+	upd.mu.Lock()
+	updVer := upd.version
+	upd.mu.Unlock()
+	if updVer != "" {
+		m.Add(cmdDoUpdate, "Обновить до "+updVer+" и перезапустить", false)
+	}
+	m.Add(cmdCheckUpd, "Проверить обновления (v"+version+")", false)
+	m.Separator()
 	m.Add(cmdQuit, "Выход", false)
 	switch m.Track(a.hwnd) {
 	case cmdCapture:
@@ -233,6 +277,12 @@ func (a *App) showTrayMenu() {
 		a.cfg.AutoStart = !a.cfg.AutoStart
 		a.cfg.save()
 		_ = ensureAutoStart(a.cfg.AutoStart)
+	case cmdCheckUpd:
+		a.requestUpdateCheck(true)
+	case cmdDoUpdate:
+		if err := a.applyUpdate(); err != nil {
+			win.MessageBox("Не удалось обновиться:\n"+err.Error(), appTitle, win.MB_OK|win.MB_ICONERROR|win.MB_TOPMOST)
+		}
 	case cmdQuit:
 		a.hwnd.PostMessage(win.WM_CLOSE, 0, 0)
 	}
@@ -299,6 +349,57 @@ func (a *App) afterCapture() {
 	}
 	a.active = false
 	win.TrimWorkingSet()
+	if a.pendingUpdate {
+		a.pendingUpdate = false
+		if err := a.applyUpdate(); err != nil {
+			a.notify("Обновление", err.Error())
+		}
+	}
+}
+
+// onUpdateReady reacts to a downloaded update.
+func (a *App) onUpdateReady() {
+	upd.mu.Lock()
+	ver := upd.version
+	msg := upd.message
+	manual := upd.manifest
+	upd.mu.Unlock()
+	if ver == "" {
+		return
+	}
+	logf("update: %s ready, mode=%s active=%v", ver, a.cfg.AutoUpdate, a.active)
+	if a.cfg.AutoUpdate == "auto" {
+		if err := a.applyUpdate(); err != nil {
+			logf("update: apply failed: %v", err)
+			a.notify("Обновление "+ver, "Не удалось обновиться автоматически: "+err.Error())
+		}
+		return
+	}
+	if manual {
+		win.MessageBox("Скачана версия "+ver+".\nОбновить сейчас? Это перезапустит YASShoter.",
+			appTitle, win.MB_OKCANCEL|win.MB_ICONINFORMATION|win.MB_TOPMOST)
+		if err := a.applyUpdate(); err != nil {
+			a.notify("Обновление "+ver, err.Error())
+		}
+		return
+	}
+	a.notify("Доступно обновление "+ver, "Меню трея → «Обновить до "+ver+"»")
+	_ = msg
+}
+
+func (a *App) onUpdateFailed() {
+	upd.mu.Lock()
+	msg := upd.message
+	manual := upd.manifest
+	upd.mu.Unlock()
+	if msg == "" {
+		return
+	}
+	if manual {
+		win.MessageBox(msg, appTitle, win.MB_OK|win.MB_ICONINFORMATION|win.MB_TOPMOST)
+		return
+	}
+	logf("update: %s", msg)
 }
 
 func (a *App) startEditor(region win.RECT) {
