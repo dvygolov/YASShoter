@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -80,6 +81,9 @@ func (a *App) requestUpdateCheck(manual bool) {
 	a.hwnd.PostMessage(umUpdateBusy, 0, 0)
 
 	go func() {
+		// the check allocates TLS buffers and a copy of the exe: hand the pages
+		// back to the OS once we are done so the idle footprint stays small
+		defer debug.FreeOSMemory()
 		rel, err := fetchLatestRelease()
 		if err != nil {
 			upd.setMessage("Не удалось проверить обновления: "+err.Error(), manual)

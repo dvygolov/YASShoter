@@ -54,24 +54,6 @@ func runApp() {
 	app := &App{cfg: cfg}
 	cleanupOldBinary()
 
-	// one instance only: two of them would fight for the same hotkey. A short
-	// retry window lets a self-update relaunch land while the old process exits.
-	if h, err := win.CreateMutexAndCheck(appName + "_single_instance"); err != nil {
-		_ = h
-		ok := false
-		for i := 0; i < 30; i++ {
-			win.Sleep(100)
-			if _, err2 := win.CreateMutexAndCheck(appName + "_single_instance"); err2 == nil {
-				ok = true
-				break
-			}
-		}
-		if !ok {
-			logf("another instance is already running, exiting")
-			return
-		}
-	}
-
 	if cfg.AutoStart {
 		_ = ensureAutoStart(true)
 	}
