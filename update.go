@@ -255,9 +255,20 @@ func (a *App) applyUpdate() error {
 		_ = os.Rename(old, cur)
 		return err
 	}
-	logf("update: installed %s, restarting", ver)
 	_ = os.Remove(path)
-	win.ShellExecute("open", cur, "", filepath.Dir(cur), win.SW_SHOWNORMAL)
+	// hand the instance slot over before the new process starts, otherwise it
+	// would wait for us and give up while we are still shutting down
+	if instanceMutex != 0 {
+		win.CloseHandle(instanceMutex)
+		instanceMutex = 0
+	}
+	if !win.ShellExecuteOK("open", cur, "", filepath.Dir(cur), win.SW_SHOWNORMAL) {
+		// keep running on the new binary instead of vanishing from the tray
+		logf("update: relaunch failed, staying alive (restart manually)")
+		a.notify("Обновление "+ver, "Файл обновлён, перезапустите YASShoter вручную")
+		return nil
+	}
+	logf("update: installed %s, relaunched", ver)
 	a.hwnd.PostMessage(win.WM_CLOSE, 0, 0)
 	return nil
 }

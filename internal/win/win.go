@@ -21,6 +21,12 @@ func CreateMutex(name string) HANDLE {
 
 // CreateMutexAndCheck creates a named mutex and reports whether this process is
 // the first owner (ERROR_ALREADY_EXISTS means another instance is running).
+func CloseHandle(h HANDLE) {
+	if h != 0 {
+		dllKernel32.NewProc("CloseHandle").Call(uintptr(h))
+	}
+}
+
 func CreateMutexAndCheck(name string) (HANDLE, error) {
 	h, _, e := pCreateMutexW.Call(0, 0, ptr(unsafe.Pointer(UTF16Ptr(name))))
 	errno, _ := e.(syscall.Errno)
@@ -456,7 +462,14 @@ func FlushDwm() { pDwmFlush.Call() }
 
 // ---------- shell ----------
 
-func ShellExecute(verb, file, params, dir string, show int32) {
+// ShellExecuteOK launches a file and reports whether the shell accepted it
+// (ShellExecute returns a value > 32 on success).
+func ShellExecuteOK(verb, file, params, dir string, show int32) bool {
+	r := shellExecuteRaw(verb, file, params, dir, show)
+	return r > 32
+}
+
+func shellExecuteRaw(verb, file, params, dir string, show int32) uintptr {
 	var vp, fp, pp, dp *uint16
 	if verb != "" {
 		vp = UTF16Ptr(verb)
@@ -470,12 +483,17 @@ func ShellExecute(verb, file, params, dir string, show int32) {
 	if dir != "" {
 		dp = UTF16Ptr(dir)
 	}
-	pShellExecuteW.Call(0,
+	r, _, _ := pShellExecuteW.Call(0,
 		uintptr(unsafe.Pointer(vp)),
 		uintptr(unsafe.Pointer(fp)),
 		uintptr(unsafe.Pointer(pp)),
 		uintptr(unsafe.Pointer(dp)),
 		uintptr(show))
+	return r
+}
+
+func ShellExecute(verb, file, params, dir string, show int32) {
+	shellExecuteRaw(verb, file, params, dir, show)
 }
 
 const (

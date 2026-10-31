@@ -33,14 +33,20 @@ func main() {
 	runApp()
 }
 
+// instanceMutex is kept open for the whole process lifetime; a self-update
+// closes it explicitly so the relaunched process starts without a race.
+var instanceMutex win.HANDLE
+
 // acquireSingleInstance returns true when this process owns the instance mutex.
 func acquireSingleInstance() bool {
-	if _, err := win.CreateMutexAndCheck(appName + "_single_instance"); err == nil {
+	if h, err := win.CreateMutexAndCheck(appName + "_single_instance"); err == nil {
+		instanceMutex = h
 		return true
 	}
-	for i := 0; i < 30; i++ {
+	for i := 0; i < 60; i++ {
 		win.Sleep(100)
-		if _, err := win.CreateMutexAndCheck(appName + "_single_instance"); err == nil {
+		if h, err := win.CreateMutexAndCheck(appName + "_single_instance"); err == nil {
+			instanceMutex = h
 			return true
 		}
 	}
