@@ -94,3 +94,24 @@ func probeDevice(id string, dur time.Duration) (int, error) {
 	}
 	return peak, nil
 }
+
+// menuDumpMode: `yas-shotter.exe --menu-dump` builds the tray menu and writes it
+// to the log, a cheap sanity check for the device submenus without clicking.
+func menuDumpEnabled() bool {
+	for _, a := range os.Args[1:] {
+		if a == "--menu-dump" {
+			return true
+		}
+	}
+	return false
+}
+
+func runMenuDump(app *App) {
+	m := app.buildTrayMenu()
+	defer m.Destroy()
+	logf("menu-dump: built menu with %d devices for source=%s device=%q",
+		len(app.menuDevices), app.cfg.AudioSource, app.cfg.AudioDevice)
+	for i, d := range app.menuDevices {
+		logf("menu-dump: device %d = %q %s", i, d.Name, d.ID)
+	}
+}

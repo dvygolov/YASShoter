@@ -143,6 +143,12 @@ func (m *Menu) Add(id uint32, text string, checked bool) {
 	pAppendMenuW.Call(uintptr(m.h), uintptr(flags), uintptr(id), uintptr(unsafe.Pointer(UTF16Ptr(text))))
 }
 
+// Submenu attaches a nested popup menu.
+func (m *Menu) Submenu(text string, sub *Menu) {
+	pAppendMenuW.Call(uintptr(m.h), uintptr(MF_STRING|MF_POPUP),
+		uintptr(sub.h), uintptr(unsafe.Pointer(UTF16Ptr(text))))
+}
+
 func (m *Menu) Separator() {
 	pAppendMenuW.Call(uintptr(m.h), MF_SEPARATOR, 0, 0)
 }

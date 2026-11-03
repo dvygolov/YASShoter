@@ -351,3 +351,6 @@ func (s *SinkWriter) Close() {
 
 // logMF lets the win package report non fatal encoder issues.
 var logMF = func(string, ...any) {}
+
+// SetMFLogger routes win package diagnostics into the application log.
+func SetMFLogger(fn func(string, ...any)) { logMF = fn }

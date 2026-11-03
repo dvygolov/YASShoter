@@ -33,12 +33,14 @@ type App struct {
 
 	taskbarMsg    uint32
 	pendingUpdate bool
+	menuDevices   []win.RenderDevice
 
 	rec          *Recorder
 	recIcon      win.HICON
 	recMu        sync.Mutex
 	recSavedPath string
 	recSavedErr  string
+	probePeak    int
 	hotkeyID     int32
 	altHotkeyID  int32
 	hotkeyMods   uint32
@@ -51,20 +53,28 @@ const (
 	umHotkeyShot     = win.WM_APP + 20
 	umHotkeyVideo    = win.WM_APP + 21
 	umRecordingSaved = win.WM_APP + 22
+	umProbeDone      = win.WM_APP + 23
 )
 
 const (
-	cmdCapture  = 1
-	cmdFolder   = 2
-	cmdConfig   = 3
-	cmdAuto     = 4
-	cmdQuit     = 5
-	cmdCheckUpd = 6
-	cmdDoUpdate = 7
-	cmdRecord   = 8
-	cmdStopRec  = 9
-	cmdAudioOn  = 10
-	cmdCursorOn = 11
+	cmdCapture       = 1
+	cmdFolder        = 2
+	cmdConfig        = 3
+	cmdAuto          = 4
+	cmdQuit          = 5
+	cmdCheckUpd      = 6
+	cmdDoUpdate      = 7
+	cmdRecord        = 8
+	cmdStopRec       = 9
+	cmdAudioOn       = 10
+	cmdCursorOn      = 11
+	cmdAudioOff      = 12
+	cmdAudioSystem   = 13
+	cmdAudioMic      = 14
+	cmdDeviceDefault = 15
+
+	// device menu items live in this id range
+	cmdDeviceBase = 200
 )
 
 func runApp() {
@@ -104,6 +114,9 @@ func runApp() {
 
 	if demoEditorEnabled() {
 		app.openDemoEditor()
+	}
+	if menuDumpEnabled() {
+		runMenuDump(app)
 	}
 	if !cfg.TrayPromoted {
 		// give the shell a moment to create the NotifyIconSettings entry, then
@@ -221,6 +234,16 @@ func (a *App) wndProc(hwnd win.HWND, msg uint32, wp, lp uintptr) uintptr {
 	case umHotkeyVideo:
 		a.toggleRecording()
 		return 0
+	case umProbeDone:
+		a.recMu.Lock()
+		peak := a.probePeak
+		a.recMu.Unlock()
+		if peak < 300 {
+			a.notify("Звук: тишина", "На выбранном устройстве сейчас тишина. Проверьте громкость и куда играет приложение.")
+		} else {
+			a.notify("Звук есть", "На выбранном устройстве есть сигнал (peak "+itoa(int64(peak))+").")
+		}
+		return 0
 	case umRecordingSaved:
 		a.onRecordingSaved()
 		return 0
@@ -289,8 +312,16 @@ func (a *App) wndProc(hwnd win.HWND, msg uint32, wp, lp uintptr) uintptr {
 }
 
 func (a *App) showTrayMenu() {
-	m := win.NewPopupMenu()
+	m := a.buildTrayMenu()
 	defer m.Destroy()
+	cmd := m.Track(a.hwnd)
+	m.Destroy()
+	a.handleTrayCommand(cmd)
+}
+
+// buildTrayMenu creates the whole menu (including the audio submenus).
+func (a *App) buildTrayMenu() *win.Menu {
+	m := win.NewPopupMenu()
 	if a.rec != nil {
 		m.Add(cmdStopRec, "Остановить запись\tCtrl+PrintScreen", false)
 		m.Default(cmdStopRec)
@@ -298,16 +329,43 @@ func (a *App) showTrayMenu() {
 		m.Add(cmdCapture, "Снимок области\tPrintScreen", false)
 		m.Default(cmdCapture)
 		m.Add(cmdRecord, "Запись видео\tCtrl+PrintScreen", false)
-		audioLabel := "Звук: система"
-		switch a.cfg.AudioSource {
-		case "mic":
-			audioLabel = "Звук: микрофон"
-		case "off":
-			audioLabel = "Звук: выкл"
-		}
-		m.Add(cmdAudioOn, audioLabel, a.cfg.AudioSource != "off")
-		m.Add(cmdCursorOn, "Показывать курсор", a.cfg.VideoCursor)
 	}
+
+	// sound source
+	srcMenu := win.NewPopupMenu()
+	srcMenu.Add(cmdAudioOff, "Без звука", a.cfg.AudioSource == "off")
+	srcMenu.Add(cmdAudioSystem, "Система (то, что играет)", a.cfg.AudioSource == "system")
+	srcMenu.Add(cmdAudioMic, "Микрофон", a.cfg.AudioSource == "mic")
+	srcLabel := "Звук: "
+	switch a.cfg.AudioSource {
+	case "mic":
+		srcLabel += "микрофон"
+	case "off":
+		srcLabel += "выкл"
+	default:
+		srcLabel += "система"
+	}
+	m.Submenu(srcLabel, srcMenu)
+
+	// device list for the current source
+	a.menuDevices = listAudioDevices(a.cfg.AudioSource == "mic")
+	devMenu := win.NewPopupMenu()
+	devMenu.Add(cmdDeviceDefault, "По умолчанию (как в Windows)", a.cfg.AudioDevice == "")
+	selectedName := "по умолчанию"
+	for i, d := range a.menuDevices {
+		checked := a.cfg.AudioDevice != "" && d.ID == a.cfg.AudioDevice
+		if checked {
+			selectedName = d.Name
+		}
+		name := d.Name
+		if name == "" {
+			name = "Устройство " + itoa(int64(i+1))
+		}
+		devMenu.Add(uint32(cmdDeviceBase+i), shorten(name, 48), checked)
+	}
+	m.Submenu("Устройство: "+selectedName, devMenu)
+
+	m.Add(cmdCursorOn, "Показывать курсор", a.cfg.VideoCursor)
 	m.Separator()
 	m.Add(cmdFolder, "Открыть папку сохранения", false)
 	m.Add(cmdConfig, "Настройки (config.json)", false)
@@ -322,118 +380,142 @@ func (a *App) showTrayMenu() {
 	m.Add(cmdCheckUpd, "Проверить обновления (v"+version+")", false)
 	m.Separator()
 	m.Add(cmdQuit, "Выход", false)
-	switch m.Track(a.hwnd) {
-	case cmdCapture:
+	return m
+}
+
+// handleTrayCommand executes the chosen item.
+func (a *App) handleTrayCommand(cmd uint32) {
+	switch {
+	case cmd == cmdCapture:
 		a.startCapture(modeShot)
-	case cmdRecord:
+	case cmd == cmdRecord:
 		a.toggleRecording()
-	case cmdAudioOn:
-		switch a.cfg.AudioSource {
-		case "system":
-			a.cfg.AudioSource = "mic"
-		case "mic":
+	case cmd == cmdStopRec:
+		a.stopRecording()
+	case cmd == cmdAudioOff, cmd == cmdAudioSystem, cmd == cmdAudioMic:
+		switch cmd {
+		case cmdAudioOff:
 			a.cfg.AudioSource = "off"
-		default:
+		case cmdAudioSystem:
 			a.cfg.AudioSource = "system"
+		default:
+			a.cfg.AudioSource = "mic"
 		}
 		a.cfg.VideoAudio = a.cfg.AudioSource != "off"
 		a.cfg.save()
-	case cmdCursorOn:
-		a.cfg.VideoCursor = !a.cfg.VideoCursor
+		logf("menu: audio source -> %s", a.cfg.AudioSource)
+		a.notify("Звук", "Источник: "+a.cfg.AudioSource)
+	case cmd == cmdDeviceDefault:
+		a.cfg.AudioDevice = ""
 		a.cfg.save()
-	case cmdStopRec:
-		a.stopRecording()
-	case cmdFolder:
+		logf("menu: audio device -> default")
+		a.probeSelectedDevice("")
+	case cmd >= cmdDeviceBase && int(cmd) < cmdDeviceBase+len(a.menuDevices):
+		d := a.menuDevices[cmd-cmdDeviceBase]
+		a.cfg.AudioDevice = d.ID
+		a.cfg.save()
+		logf("menu: audio device -> %s (%s)", d.Name, d.ID)
+		a.probeSelectedDevice(d.ID)
+	case cmd == cmdFolder:
 		win.ShellExecute("open", a.cfg.SaveDir, "", "", win.SW_SHOWNORMAL)
-	case cmdConfig:
+	case cmd == cmdConfig:
 		win.ShellExecute("open", a.cfg.path, "", "", win.SW_SHOWNORMAL)
-	case cmdAuto:
+	case cmd == cmdAuto:
 		a.cfg.AutoStart = !a.cfg.AutoStart
 		a.cfg.save()
 		_ = ensureAutoStart(a.cfg.AutoStart)
-	case cmdCheckUpd:
+	case cmd == cmdCheckUpd:
 		a.requestUpdateCheck(true)
-	case cmdDoUpdate:
+	case cmd == cmdDoUpdate:
 		if err := a.applyUpdate(); err != nil {
 			win.MessageBox("Не удалось обновиться:\n"+err.Error(), appTitle, win.MB_OK|win.MB_ICONERROR|win.MB_TOPMOST)
 		}
-	case cmdQuit:
+	case cmd == cmdQuit:
 		a.hwnd.PostMessage(win.WM_CLOSE, 0, 0)
 	}
 }
 
-// startCapture freezes the screen and opens the selection overlay. This is the
-// hot path: capture + dim + show must stay in the tens of milliseconds.
-func (a *App) startCapture(mode overlayMode) {
-	if a.active || a.rec != nil {
-		// a screenshot while recording would freeze the screen into the video
-		return
-	}
-	start := win.GetTickCount()
-	defer func() {
-		logf("capture pipeline %d ms", win.GetTickCount()-start)
+// listAudioDevices enumerates endpoints for the given source.
+func listAudioDevices(mic bool) []win.RenderDevice {
+	done := make(chan []win.RenderDevice, 1)
+	go func() {
+		if !win.ComInit() {
+			done <- nil
+			return
+		}
+		var devs []win.RenderDevice
+		var err error
+		if mic {
+			devs, err = win.ListCaptureDevices()
+		} else {
+			devs, err = win.ListRenderDevices()
+		}
+		if err != nil {
+			logf("devices: %v", err)
+			devs = nil
+		}
+		done <- devs
 	}()
-	a.active = true
-	screen := win.VirtualScreen()
-	a.screen = screen
-
-	t0 := win.GetTickCount()
-	src, err := win.NewDib(screen.W(), screen.H())
-	if err != nil {
-		a.active = false
-		return
+	select {
+	case d := <-done:
+		return d
+	case <-time.After(2 * time.Second):
+		return nil
 	}
-	sdc, release := win.ScreenDC()
-	src.BlitRaw(sdc, screen.Left, screen.Top, screen.W(), screen.H())
-	release()
-	t1 := win.GetTickCount()
-	a.src = src
-
-	frame, err := win.NewDib(screen.W(), screen.H())
-	if err != nil {
-		src.Close()
-		a.src = nil
-		a.active = false
-		return
-	}
-	a.frame = frame
-
-	t2 := win.GetTickCount()
-
-	if a.overlay == nil {
-		a.overlay = newOverlay(a)
-	}
-	audioMode := a.cfg.AudioSource
-	if !a.cfg.VideoAudio {
-		audioMode = ""
-	}
-	a.overlay.show(mode, audioMode)
-	t3 := win.GetTickCount()
-	logf("timings: capture=%dms dim=%dms overlay=%dms (total %dms)", t1-t0, t2-t1, t3-t2, t3-t0)
-	logf("overlay shown screen=%d,%d %dx%d windows=%d", screen.Left, screen.Top, screen.W(), screen.H(), len(a.overlay.windows))
 }
 
-// afterCapture releases every heavy buffer: the resident footprint stays small.
-func (a *App) afterCapture() {
-	if a.overlay != nil {
-		a.overlay.hide()
+// probeSelectedDevice tells the user whether the chosen endpoint carries sound
+// right now, which is the fastest way to catch a wrong device.
+func (a *App) probeSelectedDevice(deviceID string) {
+	source := a.cfg.AudioSource
+	if source == "off" {
+		source = "system"
 	}
-	if a.src != nil {
-		a.src.Close()
-		a.src = nil
-	}
-	if a.frame != nil {
-		a.frame.Close()
-		a.frame = nil
-	}
-	a.active = false
-	win.TrimWorkingSet()
-	if a.pendingUpdate {
-		a.pendingUpdate = false
-		if err := a.applyUpdate(); err != nil {
-			a.notify("Обновление", err.Error())
+	go func() {
+		if !win.ComInit() {
+			return
 		}
+		var cap *win.AudioCapture
+		var err error
+		if source == "mic" {
+			cap, err = win.OpenMicrophoneAudio(deviceID)
+		} else {
+			cap, err = win.OpenLoopbackAudio(deviceID)
+		}
+		if err != nil {
+			a.hwnd.PostMessage(umProbeDone, 0, 0)
+			logf("menu: probe failed: %v", err)
+			return
+		}
+		peak := probeCapture(cap, 1200*time.Millisecond)
+		cap.Close()
+		a.recMu.Lock()
+		a.probePeak = peak
+		a.recMu.Unlock()
+		a.hwnd.PostMessage(umProbeDone, 0, 0)
+	}()
+}
+
+func probeCapture(cap *win.AudioCapture, dur time.Duration) int {
+	deadline := time.Now().Add(dur)
+	peak := 0
+	for time.Now().Before(deadline) {
+		pcm, err := cap.ReadPCM()
+		if err != nil {
+			break
+		}
+		for i := 0; i+1 < len(pcm); i += 2 {
+			v := int(int16(uint16(pcm[i]) | uint16(pcm[i+1])<<8))
+			if v < 0 {
+				v = -v
+			}
+			if v > peak {
+				peak = v
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
+	return peak
 }
 
 // toggleRecording starts the video overlay or stops an active recording.

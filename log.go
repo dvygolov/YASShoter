@@ -36,6 +36,8 @@ func initLog() {
 	}
 	logFile = f
 	logOn = true
+	// route Win32/MF/WASAPI diagnostics into the same file
+	win.SetMFLogger(logf)
 	logf("start %s pid=%d", version, win.SelfPID())
 }
 

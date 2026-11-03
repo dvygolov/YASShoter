@@ -135,10 +135,11 @@ func deviceName(dev unsafe.Pointer) (string, error) {
 	key := propertyKey{FormatID: GUID{0xA45C254E, 0xDF1C, 0x4EFD, [8]byte{0x80, 0x20, 0x67, 0xD1, 0x46, 0xA8, 0x50, 0xE0}}, PID: 14}
 	var pv propVariant
 	if hr := comCall(store, 5, uintptr(unsafe.Pointer(&key)), uintptr(unsafe.Pointer(&pv))); HRFailed(hr) {
+		logMF("deviceName: GetValue 0x%08x", uint32(hr))
 		return "", fmt.Errorf("GetValue 0x%08x", uint32(hr))
 	}
 	defer propVariantClear(&pv)
-	if pv.VT != 31 || pv.P != 0 { // VT_LPWSTR
+	if pv.VT != 31 || pv.P == 0 { // must be a VT_LPWSTR with a value
 		return "", nil
 	}
 	return UTF16ToString((*[256]uint16)(unsafe.Pointer(pv.P))[:]), nil
