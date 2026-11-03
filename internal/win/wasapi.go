@@ -31,6 +31,9 @@ const (
 	eRender                                 = 0
 	eCapture                                = 1
 
+	// SubFormat offset inside WAVEFORMATEXTENSIBLE
+	waveFormatExtSubFormatOffset = 18 + 2 + 4
+
 	// mixing format used when two sources are recorded together
 	mixRate                = 48000
 	mixChannels            = 2
@@ -66,6 +69,7 @@ type AudioCapture struct {
 	capture  unsafe.Pointer
 	Fmt      AudioFormat
 	isFloat  bool
+	Bits     int
 	DeviceID string
 	Name     string
 	buf      []byte
@@ -239,12 +243,16 @@ func openAudio(deviceFilter string, loopback, forceStereo bool) (*AudioCapture, 
 	format := (*waveFormatEx)(wfx)
 	a.Fmt.Rate = int(format.SamplesPerSec)
 	a.Fmt.Channels = int(format.Channels)
+	a.Bits = int(format.BitsPerSample)
 
 	tag := format.FormatTag
 	a.isFloat = tag == WAVE_FORMAT_IEEE_FLOAT
 	if tag == WAVE_FORMAT_EXTENSIBLE && format.CBSize >= 22 {
-		// WAVEFORMATEXTENSIBLE: SubFormat GUID sits after the base struct
-		sub := (*GUID)(unsafe.Add(wfx, unsafe.Sizeof(waveFormatEx{})))
+		// WAVEFORMATEXTENSIBLE = WAVEFORMATEX (18 bytes) + wValidBitsPerSample (2)
+		// + dwChannelMask (4) + SubFormat GUID. It must be offset 24, not
+		// unsafe.Sizeof(waveFormatEx{}): Go pads that struct to 20, which made the
+		// float32 check fail and we played raw float bits as PCM16 - loud noise.
+		sub := (*GUID)(unsafe.Add(wfx, waveFormatExtSubFormatOffset))
 		a.isFloat = *sub == KSDATAFORMAT_SUBTYPE_FLOAT
 	}
 	if a.Fmt.Rate <= 0 || a.Fmt.Channels <= 0 {
@@ -281,10 +289,14 @@ func openAudio(deviceFilter string, loopback, forceStereo bool) (*AudioCapture, 
 			custom = nil
 		}
 	}
+	logMF("audio[%s]: initialize custom=%v flags=%#x hr=%#x", a.DeviceID, custom != nil, flags, uint32(hr))
+	logMF("audio %q: native rate=%d ch=%d bits=%d float=%v forced=%v",
+		a.Name, a.Fmt.Rate, a.Fmt.Channels, a.Bits, a.isFloat, custom != nil)
 	if custom != nil {
 		a.Fmt.Rate = int(mixRate)
 		a.Fmt.Channels = int(mixChannels)
 		a.isFloat = false
+		a.Bits = 16
 	}
 	pCoTaskMemFree.Call(uintptr(wfx))
 	if HRFailed(hr) {
@@ -348,22 +360,8 @@ func (a *AudioCapture) ReadPCM() ([]byte, error) {
 			dst := make([]byte, samples*2)
 			if flags&AUDCLNT_BUFFERFLAGS_SILENT != 0 || data == nil {
 				// leave zeros
-			} else if a.isFloat {
-				src := unsafe.Slice((*float32)(data), samples)
-				for i, f := range src {
-					v := f * 32767
-					if v > 32767 {
-						v = 32767
-					} else if v < -32768 {
-						v = -32768
-					}
-					s := int16(math.Round(float64(v)))
-					dst[i*2] = byte(uint16(s))
-					dst[i*2+1] = byte(uint16(s) >> 8)
-				}
 			} else {
-				src := unsafe.Slice((*byte)(data), samples*2)
-				copy(dst, src)
+				convertToPCM16(dst, data, samples, a.Bits, a.isFloat)
 			}
 			out = append(out, dst...)
 		}
@@ -409,6 +407,53 @@ func deviceID(dev unsafe.Pointer) (string, error) {
 	s := UTF16ToString((*[512]uint16)(unsafe.Pointer(p))[:])
 	pCoTaskMemFree.Call(uintptr(unsafe.Pointer(p)))
 	return s, nil
+}
+
+// convertToPCM16 turns one packet of the device format into interleaved PCM16.
+func convertToPCM16(dst []byte, data unsafe.Pointer, samples, bits int, isFloat bool) {
+	switch {
+	case isFloat && bits == 32:
+		src := unsafe.Slice((*float32)(data), samples)
+		for i, f := range src {
+			v := f * 32767
+			if v > 32767 {
+				v = 32767
+			} else if v < -32768 {
+				v = -32768
+			}
+			s := int16(math.Round(float64(v)))
+			dst[i*2] = byte(uint16(s))
+			dst[i*2+1] = byte(uint16(s) >> 8)
+		}
+	case isFloat && bits == 64:
+		src := unsafe.Slice((*float64)(data), samples)
+		for i, f := range src {
+			v := f * 32767
+			if v > 32767 {
+				v = 32767
+			} else if v < -32768 {
+				v = -32768
+			}
+			s := int16(math.Round(v))
+			dst[i*2] = byte(uint16(s))
+			dst[i*2+1] = byte(uint16(s) >> 8)
+		}
+	case bits == 32:
+		src := unsafe.Slice((*int32)(data), samples)
+		for i, v := range src {
+			dst[i*2] = byte(uint16(v >> 16))
+			dst[i*2+1] = byte(uint16(v >> 24))
+		}
+	case bits == 24:
+		src := unsafe.Slice((*byte)(data), samples*3)
+		for i := 0; i < samples; i++ {
+			dst[i*2] = src[i*3+1]
+			dst[i*2+1] = src[i*3+2]
+		}
+	default: // 16 bit PCM
+		src := unsafe.Slice((*byte)(data), samples*2)
+		copy(dst, src)
+	}
 }
 
 func (a *AudioCapture) Close() {

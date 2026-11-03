@@ -82,8 +82,8 @@ func (a *App) startRecording(region win.RECT, audioMode string) {
 	if audio {
 		caps = openAudioSources(a.cfg.AudioSource, a.cfg.AudioDevice, a.cfg.AudioDeviceMic)
 		if len(caps) > 0 {
-			cfg.AudioRate = caps[0].Fmt.Rate
-			cfg.AudioChannels = caps[0].Fmt.Channels
+			cfg.AudioRate = canonRate
+			cfg.AudioChannels = canonChannels
 			for _, c := range caps {
 				logf("record: audio source=%s device=%s %q (%d Hz, %d ch)", a.cfg.AudioSource, c.DeviceID, c.Name, c.Fmt.Rate, c.Fmt.Channels)
 			}
@@ -237,8 +237,13 @@ func (r *Recorder) audioLoop(caps []*win.AudioCapture) {
 	}
 	defer win.ComUninit()
 
-	rate := caps[0].Fmt.Rate
-	channels := caps[0].Fmt.Channels
+	// everything is converted to the canonical 48 kHz stereo PCM16 first
+	conv := make([]*srcConverter, len(caps))
+	for i, c := range caps {
+		conv[i] = newSrcConverter(c.Fmt.Rate, c.Fmt.Channels)
+	}
+	rate := canonRate
+	channels := canonChannels
 	bytesPerFrame := channels * 2
 	pend := make([][]byte, len(caps))
 	out := make([]byte, rate*bytesPerFrame/2)
@@ -259,7 +264,7 @@ func (r *Recorder) audioLoop(caps []*win.AudioCapture) {
 				logf("record: audio read: %v", err)
 				return
 			}
-			pend[i] = append(pend[i], pcm...)
+			pend[i] = append(pend[i], conv[i].convert(pcm)...)
 			if len(pend[i]) > rate*bytesPerFrame*30 {
 				pend[i] = pend[i][len(pend[i])-rate*bytesPerFrame*30:]
 			}
