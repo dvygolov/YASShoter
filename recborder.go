@@ -32,6 +32,9 @@ func newRecBorder(region win.RECT, thickness int32) *recBorder {
 		{r.Right - thickness, r.Top, r.Right, r.Bottom},   // right
 	}
 	for i, rr := range rects {
+		if rr.W() <= 0 || rr.H() <= 0 {
+			continue
+		}
 		id := win.NewHandler(b.wndProc)
 		h := win.CreateWindowEx(ex, recBorderClass, appTitle, style,
 			rr.Left, rr.Top, rr.W()-rr.Left, rr.Bottom-rr.Top, 0, 0, id)
@@ -69,4 +72,26 @@ func (b *recBorder) wndProc(hwnd win.HWND, msg uint32, wp, lp uintptr) uintptr {
 		return 3
 	}
 	return win.DefWindowProc(hwnd, msg, wp, lp)
+}
+
+func clipTo(r win.RECT, clip win.RECT) win.RECT {
+	if r.Left < clip.Left {
+		r.Left = clip.Left
+	}
+	if r.Top < clip.Top {
+		r.Top = clip.Top
+	}
+	if r.Right > clip.Right {
+		r.Right = clip.Right
+	}
+	if r.Bottom > clip.Bottom {
+		r.Bottom = clip.Bottom
+	}
+	if r.Right < r.Left {
+		r.Right = r.Left
+	}
+	if r.Bottom < r.Top {
+		r.Bottom = r.Top
+	}
+	return r
 }

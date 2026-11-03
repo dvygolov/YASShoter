@@ -64,6 +64,7 @@ const (
 	cmdRecord   = 8
 	cmdStopRec  = 9
 	cmdAudioOn  = 10
+	cmdCursorOn = 11
 )
 
 func runApp() {
@@ -147,8 +148,11 @@ func (a *App) registerHotkeys() {
 // keyFilter swallows the configured hotkeys and arms the capture / recording.
 func (a *App) keyFilter(vk uint32, down bool, mods uint32) bool {
 	if vk == a.videoVK && mods == a.videoMods {
-		if down && !a.active {
-			a.hwnd.PostMessage(umHotkeyVideo, 0, 0)
+		if down {
+			logf("hotkey: video (active=%v rec=%v)", a.active, a.rec != nil)
+			if !a.active {
+				a.hwnd.PostMessage(umHotkeyVideo, 0, 0)
+			}
 		}
 		return true
 	}
@@ -282,6 +286,7 @@ func (a *App) showTrayMenu() {
 		m.Default(cmdCapture)
 		m.Add(cmdRecord, "Запись видео\tCtrl+PrintScreen", false)
 		m.Add(cmdAudioOn, "Записывать со звуком", a.cfg.VideoAudio)
+		m.Add(cmdCursorOn, "Показывать курсор", a.cfg.VideoCursor)
 	}
 	m.Separator()
 	m.Add(cmdFolder, "Открыть папку сохранения", false)
@@ -304,6 +309,9 @@ func (a *App) showTrayMenu() {
 		a.toggleRecording()
 	case cmdAudioOn:
 		a.cfg.VideoAudio = !a.cfg.VideoAudio
+		a.cfg.save()
+	case cmdCursorOn:
+		a.cfg.VideoCursor = !a.cfg.VideoCursor
 		a.cfg.save()
 	case cmdStopRec:
 		a.stopRecording()
@@ -399,6 +407,7 @@ func (a *App) afterCapture() {
 // toggleRecording starts the video overlay or stops an active recording.
 func (a *App) toggleRecording() {
 	if a.rec != nil {
+		logf("hotkey: stop requested")
 		a.stopRecording()
 		return
 	}

@@ -26,6 +26,7 @@ type Config struct {
 	HotkeyVideo      string  `json:"hotkeyVideo"`
 	VideoFps         int     `json:"videoFps"`
 	VideoAudio       bool    `json:"videoAudio"`
+	VideoCursor      bool    `json:"videoCursor"`
 	AutoStart        bool    `json:"autoStart"`
 	CopyToClipboard  bool    `json:"copyToClipboard"`
 	DisableSnipping  bool    `json:"disableSnippingToolPrintScreen"`
@@ -53,6 +54,7 @@ func defaultConfig() *Config {
 		HotkeyVideo:      "Ctrl+PrintScreen",
 		VideoFps:         30,
 		VideoAudio:       false,
+		VideoCursor:      true,
 		AutoStart:        true,
 		CopyToClipboard:  true,
 		DisableSnipping:  false,

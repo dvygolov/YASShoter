@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,6 +28,7 @@ type Recorder struct {
 
 	sw     *win.SinkWriter
 	border *recBorder
+	cursor bool
 	start  time.Time
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -102,12 +104,13 @@ func (a *App) startRecording(region win.RECT, audio bool) {
 		return
 	}
 
-	r := &Recorder{app: a, region: region, path: path, fps: fps, audio: sw.HasAudio(), sw: sw, start: time.Now(), stopCh: make(chan struct{})}
+	r := &Recorder{app: a, region: region, path: path, fps: fps, audio: sw.HasAudio(), sw: sw,
+		cursor: a.cfg.VideoCursor, start: time.Now(), stopCh: make(chan struct{})}
 	a.rec = r
 	if cap == nil && audio {
 		a.notify("Запись", "Звук недоступен, записываю без него")
 	}
-	logf("record: start %dx%d fps=%d audio=%v file=%s", w, h, fps, r.audio, path)
+	logf("record: start %dx%d fps=%d audio=%v cursor=%v file=%s", w, h, fps, r.audio, r.cursor, path)
 
 	r.border = newRecBorder(region, win.Scale(2, win.DpiForPoint(win.POINT{X: region.Left, Y: region.Top})))
 	a.enterRecordingUI()
@@ -148,6 +151,7 @@ func (a *App) stopRecording() {
 		} else {
 			logf("record: finalize failed: %v", err)
 		}
+		debug.FreeOSMemory()
 		a.recMu.Lock()
 		a.recSavedPath = r.path
 		if err != nil {
@@ -184,6 +188,16 @@ func (r *Recorder) videoLoop(w, h int) {
 		sdc, release := win.ScreenDC()
 		dib.BlitRaw(sdc, r.region.Left, r.region.Top, int32(w), int32(h))
 		release()
+		if r.cursor {
+			// GDI capture never includes the pointer, so paint it in
+			if ci, visible := win.GetCursorInfo(); visible {
+				cx := ci.PtScreenPos.X - r.region.Left
+				cy := ci.PtScreenPos.Y - r.region.Top
+				if cx > -32 && cy > -32 && cx < int32(w)+32 && cy < int32(h)+32 {
+					win.DrawCursor(dib.DC, cx, cy, ci.HCursor)
+				}
+			}
+		}
 
 		ts := time.Since(r.start).Nanoseconds() / 100
 		if ts <= last {
