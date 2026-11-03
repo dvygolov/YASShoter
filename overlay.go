@@ -31,7 +31,7 @@ type Overlay struct {
 	app   *App
 	hwnd  win.HWND
 	mode  overlayMode
-	audio bool
+	audio string // "" = без звука, "system" = системный, "mic" = микрофон
 
 	windows []win.WindowInfo
 
@@ -88,7 +88,7 @@ func (o *Overlay) fit() {
 	}
 }
 
-func (o *Overlay) show(mode overlayMode, audio bool) {
+func (o *Overlay) show(mode overlayMode, audio string) {
 	if o.hwnd == 0 {
 		return
 	}
@@ -103,7 +103,7 @@ func (o *Overlay) show(mode overlayMode, audio bool) {
 		o.stroke = 1
 	}
 	o.setFontDpi(o.dpi)
-	logf("overlay: mode=%d audio=%v dpi=%d scale=%.2f", o.mode, o.audio, o.dpi, o.s)
+	logf("overlay: mode=%d audio=%q dpi=%d scale=%.2f", o.mode, o.audio, o.dpi, o.s)
 	o.windows = win.CapturableWindows(win.SelfPID(), o.app.screen)
 	o.hover = win.RECT{}
 	o.hasHover = false
@@ -251,8 +251,11 @@ func (o *Overlay) drawLabel(target win.RECT, dragging bool) win.RECT {
 	}
 	if o.mode == modeVideo {
 		audio := "звук выкл"
-		if o.audio {
-			audio = "звук вкл"
+		switch o.audio {
+		case "system":
+			audio = "звук: система"
+		case "mic":
+			audio = "звук: микрофон"
 		}
 		if dragging {
 			text = "● ВИДЕО · " + audio + " · " + text
@@ -300,6 +303,7 @@ func (o *Overlay) finish(sel win.RECT) {
 		Right:  sel.Right + o.app.screen.Left,
 		Bottom: sel.Bottom + o.app.screen.Top,
 	}
+	logf("overlay: finish sel=%+v screen=%+v", sel, screen)
 	if o.mode == modeVideo {
 		// the frozen frame is not needed once the encoder owns its own buffer
 		o.app.afterCapture()
@@ -356,6 +360,7 @@ func (o *Overlay) wndProc(hwnd win.HWND, msg uint32, wp, lp uintptr) uintptr {
 		return 0
 	case win.WM_LBUTTONDOWN:
 		p := win.GetCursorPos()
+		logf("overlay: mouse down at %d,%d (local %d,%d)", p.X, p.Y, p.X-o.app.screen.Left, p.Y-o.app.screen.Top)
 		o.start = p
 		o.cur = p
 		o.dragging = true
@@ -370,6 +375,7 @@ func (o *Overlay) wndProc(hwnd win.HWND, msg uint32, wp, lp uintptr) uintptr {
 		o.dragging = false
 		win.ReleaseCapture()
 		o.cur = win.GetCursorPos()
+		logf("overlay: mouse up at %d,%d", o.cur.X, o.cur.Y)
 		r := o.dragRect()
 		if r.W() <= mouseSlop || r.H() <= mouseSlop {
 			o.updateHover(o.cur)
@@ -402,8 +408,16 @@ func (o *Overlay) wndProc(hwnd win.HWND, msg uint32, wp, lp uintptr) uintptr {
 			}
 		case win.VK_M:
 			if o.mode == modeVideo {
-				o.audio = !o.audio
-				o.app.cfg.VideoAudio = o.audio
+				switch o.audio {
+				case "":
+					o.audio = "system"
+				case "system":
+					o.audio = "mic"
+				default:
+					o.audio = ""
+				}
+				o.app.cfg.AudioSource = o.audio
+				o.app.cfg.VideoAudio = o.audio != ""
 				o.app.cfg.save()
 				o.refresh()
 			}

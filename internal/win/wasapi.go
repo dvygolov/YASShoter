@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"unsafe"
 )
 
@@ -25,7 +26,10 @@ const (
 	AUDCLNT_STREAMFLAGS_LOOPBACK = 0x00020000
 	AUDCLNT_BUFFERFLAGS_SILENT   = 0x00000002
 	eRender                      = 0
+	eCapture                     = 1
 	eConsole                     = 0
+	eMultimedia                  = 1
+	eCommunications              = 2
 	WAVE_FORMAT_PCM              = 1
 	WAVE_FORMAT_IEEE_FLOAT       = 3
 	WAVE_FORMAT_EXTENSIBLE       = 0xFFFE
@@ -49,17 +53,128 @@ type AudioFormat struct {
 
 // AudioCapture is a started loopback stream.
 type AudioCapture struct {
-	enum    unsafe.Pointer
-	dev     unsafe.Pointer
-	client  unsafe.Pointer
-	capture unsafe.Pointer
-	Fmt     AudioFormat
-	isFloat bool
-	buf     []byte
+	enum     unsafe.Pointer
+	dev      unsafe.Pointer
+	client   unsafe.Pointer
+	capture  unsafe.Pointer
+	Fmt      AudioFormat
+	isFloat  bool
+	DeviceID string
+	buf      []byte
 }
 
-// OpenLoopbackAudio captures the default playback device.
-func OpenLoopbackAudio() (*AudioCapture, error) {
+const DEVICE_STATE_ACTIVE = 0x00000001
+
+// RenderDevice is one playback endpoint reported by the enumerator.
+type RenderDevice struct {
+	ID   string
+	Name string
+}
+
+// ListCaptureDevices returns the active recording endpoints.
+func ListCaptureDevices() ([]RenderDevice, error) {
+	return listDevices(false)
+}
+
+// ListRenderDevices returns the active playback endpoints.
+func ListRenderDevices() ([]RenderDevice, error) {
+	return listDevices(true)
+}
+
+func listDevices(loopback bool) ([]RenderDevice, error) {
+	enum, hr := ComCreateInstance(CLSIDMMDeviceEnumerator, IIDIMMDeviceEnumerator)
+	if HRFailed(hr) || enum == nil {
+		return nil, fmt.Errorf("device enumerator 0x%08x", uint32(hr))
+	}
+	defer ComRelease(enum)
+
+	// IMMDeviceEnumerator::EnumAudioEndpoints (index 3)
+	flow := uintptr(eRender)
+	if !loopback {
+		flow = uintptr(eCapture)
+	}
+	var coll unsafe.Pointer
+	hr = comCall(enum, 3, flow, DEVICE_STATE_ACTIVE, uintptr(unsafe.Pointer(&coll)))
+	if HRFailed(hr) || coll == nil {
+		return nil, fmt.Errorf("EnumAudioEndpoints 0x%08x", uint32(hr))
+	}
+	defer ComRelease(coll)
+
+	var count uint32
+	comCall(coll, 3, uintptr(unsafe.Pointer(&count)))
+	out := make([]RenderDevice, 0, count)
+	for i := uint32(0); i < count; i++ {
+		var dev unsafe.Pointer
+		if hr := comCall(coll, 4, uintptr(i), uintptr(unsafe.Pointer(&dev))); HRFailed(hr) || dev == nil {
+			continue
+		}
+		d := RenderDevice{}
+		if id, err := deviceID(dev); err == nil {
+			d.ID = id
+		}
+		if name, err := deviceName(dev); err == nil {
+			d.Name = name
+		}
+		ComRelease(dev)
+		out = append(out, d)
+	}
+	return out, nil
+}
+
+// deviceName reads the friendly name through the property store, best effort.
+func deviceName(dev unsafe.Pointer) (string, error) {
+	var store unsafe.Pointer
+	// IMMDevice::OpenPropertyStore(dwStgmAccess, IPropertyStore**) — the access
+	// mode parameter is easy to forget and then it writes through garbage
+	if hr := comCall(dev, 4, 0 /* STGM_READ */, uintptr(unsafe.Pointer(&store))); HRFailed(hr) || store == nil {
+		return "", fmt.Errorf("OpenPropertyStore 0x%08x", uint32(hr))
+	}
+	defer ComRelease(store)
+
+	// PKEY_Device_FriendlyName = {a45c254e-df1c-4efd-8020-67d146a850e0}, 14
+	key := propertyKey{FormatID: GUID{0xA45C254E, 0xDF1C, 0x4EFD, [8]byte{0x80, 0x20, 0x67, 0xD1, 0x46, 0xA8, 0x50, 0xE0}}, PID: 14}
+	var pv propVariant
+	if hr := comCall(store, 5, uintptr(unsafe.Pointer(&key)), uintptr(unsafe.Pointer(&pv))); HRFailed(hr) {
+		return "", fmt.Errorf("GetValue 0x%08x", uint32(hr))
+	}
+	defer propVariantClear(&pv)
+	if pv.VT != 31 || pv.P != 0 { // VT_LPWSTR
+		return "", nil
+	}
+	return UTF16ToString((*[256]uint16)(unsafe.Pointer(pv.P))[:]), nil
+}
+
+type propertyKey struct {
+	FormatID GUID
+	PID      uint32
+	_        uint32
+}
+
+type propVariant struct {
+	VT   uint16
+	R1   uint16
+	R2   uint16
+	R3   uint16
+	P    uintptr
+	Rest [2]uintptr
+}
+
+func propVariantClear(pv *propVariant) {
+	dllOle32.NewProc("PropVariantClear").Call(uintptr(unsafe.Pointer(pv)))
+}
+
+// OpenLoopbackAudio captures a playback device (system sound). deviceFilter is a
+// substring of the endpoint id; an empty string means "the system default".
+func OpenLoopbackAudio(deviceFilter string) (*AudioCapture, error) {
+	return openAudio(deviceFilter, true)
+}
+
+// OpenMicrophoneAudio captures the default recording device (microphone).
+func OpenMicrophoneAudio(deviceFilter string) (*AudioCapture, error) {
+	return openAudio(deviceFilter, false)
+}
+
+func openAudio(deviceFilter string, loopback bool) (*AudioCapture, error) {
 	a := &AudioCapture{}
 	enum, hr := ComCreateInstance(CLSIDMMDeviceEnumerator, IIDIMMDeviceEnumerator)
 	if HRFailed(hr) || enum == nil {
@@ -67,12 +182,21 @@ func OpenLoopbackAudio() (*AudioCapture, error) {
 	}
 	a.enum = enum
 
-	// IMMDeviceEnumerator::GetDefaultAudioEndpoint (index 4)
 	var dev unsafe.Pointer
-	hr = comCall(enum, 4, eRender, eConsole, uintptr(unsafe.Pointer(&dev)))
-	if HRFailed(hr) || dev == nil {
-		a.Close()
-		return nil, fmt.Errorf("no default playback device 0x%08x", uint32(hr))
+	if deviceFilter != "" {
+		dev = findDevice(enum, deviceFilter, loopback)
+	}
+	if dev == nil {
+		// IMMDeviceEnumerator::GetDefaultAudioEndpoint (index 4)
+		flow := uintptr(eRender)
+		if !loopback {
+			flow = uintptr(eCapture)
+		}
+		hr = comCall(enum, 4, flow, eMultimedia, uintptr(unsafe.Pointer(&dev)))
+		if HRFailed(hr) || dev == nil {
+			a.Close()
+			return nil, fmt.Errorf("no default playback device 0x%08x", uint32(hr))
+		}
 	}
 	a.dev = dev
 
@@ -111,8 +235,11 @@ func OpenLoopbackAudio() (*AudioCapture, error) {
 	}
 
 	// IAudioClient::Initialize (index 3), 1 s shared buffer
-	hr = comCall(client, 3, 0 /*shared*/, AUDCLNT_STREAMFLAGS_LOOPBACK,
-		2*HNSperSecond, 0, uintptr(wfx), 0)
+	var flags uintptr
+	if loopback {
+		flags = AUDCLNT_STREAMFLAGS_LOOPBACK
+	}
+	hr = comCall(client, 3, 0 /*shared*/, flags, 2*HNSperSecond, 0, uintptr(wfx), 0)
 	pCoTaskMemFree.Call(uintptr(wfx))
 	if HRFailed(hr) {
 		a.Close()
@@ -128,6 +255,11 @@ func OpenLoopbackAudio() (*AudioCapture, error) {
 		return nil, fmt.Errorf("IAudioCaptureClient 0x%08x", uint32(hr))
 	}
 	a.capture = cap
+
+	// record which endpoint we are listening to, for the log
+	if id, err := deviceID(dev); err == nil {
+		a.DeviceID = id
+	}
 
 	// IAudioClient::Start (index 10)
 	if hr = comCall(client, 10); HRFailed(hr) {
@@ -190,6 +322,44 @@ func (a *AudioCapture) ReadPCM() ([]byte, error) {
 	}
 	a.buf = out
 	return out, nil
+}
+
+// findDevice looks for an endpoint whose id contains filter.
+func findDevice(enum unsafe.Pointer, filter string, loopback bool) unsafe.Pointer {
+	var coll unsafe.Pointer
+	flow := uintptr(eRender)
+	if !loopback {
+		flow = uintptr(eCapture)
+	}
+	if hr := comCall(enum, 3, flow, DEVICE_STATE_ACTIVE, uintptr(unsafe.Pointer(&coll))); HRFailed(hr) || coll == nil {
+		return nil
+	}
+	defer ComRelease(coll)
+	var count uint32
+	comCall(coll, 3, uintptr(unsafe.Pointer(&count)))
+	for i := uint32(0); i < count; i++ {
+		var dev unsafe.Pointer
+		if hr := comCall(coll, 4, uintptr(i), uintptr(unsafe.Pointer(&dev))); HRFailed(hr) || dev == nil {
+			continue
+		}
+		id, _ := deviceID(dev)
+		if id != "" && strings.Contains(strings.ToLower(id), strings.ToLower(filter)) {
+			return dev
+		}
+		ComRelease(dev)
+	}
+	return nil
+}
+
+// deviceID reads IMMDevice::GetId (index 5), which is a CoTaskMem string.
+func deviceID(dev unsafe.Pointer) (string, error) {
+	var p *uint16
+	if hr := comCall(dev, 5, uintptr(unsafe.Pointer(&p))); HRFailed(hr) || p == nil {
+		return "", fmt.Errorf("GetId 0x%08x", uint32(hr))
+	}
+	s := UTF16ToString((*[512]uint16)(unsafe.Pointer(p))[:])
+	pCoTaskMemFree.Call(uintptr(unsafe.Pointer(p)))
+	return s, nil
 }
 
 func (a *AudioCapture) Close() {

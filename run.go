@@ -17,6 +17,12 @@ func main() {
 	// Win32 windows, hooks and the message loop must all live on one OS thread.
 	runtime.LockOSThread()
 
+	if audioProbeEnabled() {
+		initLog()
+		runAudioProbe()
+		return
+	}
+
 	// Claim the single instance slot before touching the log: a second process
 	// would otherwise truncate the file the first one is writing to. The retry
 	// window lets a self-update relaunch land while the old process exits.

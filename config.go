@@ -27,11 +27,16 @@ type Config struct {
 	VideoFps         int     `json:"videoFps"`
 	VideoAudio       bool    `json:"videoAudio"`
 	VideoCursor      bool    `json:"videoCursor"`
-	AutoStart        bool    `json:"autoStart"`
-	CopyToClipboard  bool    `json:"copyToClipboard"`
-	DisableSnipping  bool    `json:"disableSnippingToolPrintScreen"`
-	DimAlpha         int     `json:"dimAlpha"`
-	TrayPromoted     bool    `json:"trayPromoted"`
+	// AudioSource: "system" (loopback), "mic" или "off".
+	AudioSource string `json:"audioSource"`
+	// AudioDevice is a substring of the WASAPI endpoint id to record from;
+	// empty means the system default playback device.
+	AudioDevice     string `json:"audioDevice"`
+	AutoStart       bool   `json:"autoStart"`
+	CopyToClipboard bool   `json:"copyToClipboard"`
+	DisableSnipping bool   `json:"disableSnippingToolPrintScreen"`
+	DimAlpha        int    `json:"dimAlpha"`
+	TrayPromoted    bool   `json:"trayPromoted"`
 	// AutoUpdate: "auto" — скачивать и обновляться самому, "notify" — только
 	// сообщать о новой версии, "off" — не проверять.
 	AutoUpdate       string `json:"autoUpdate"`
@@ -54,6 +59,7 @@ func defaultConfig() *Config {
 		HotkeyVideo:      "Ctrl+PrintScreen",
 		VideoFps:         30,
 		VideoAudio:       false,
+		AudioSource:      "system",
 		VideoCursor:      true,
 		AutoStart:        true,
 		CopyToClipboard:  true,
@@ -91,6 +97,12 @@ func loadConfig() *Config {
 	}
 	if cfg.Color == "" {
 		cfg.Color = "FF3B30"
+	}
+	if cfg.AudioSource != "mic" && cfg.AudioSource != "off" && cfg.AudioSource != "system" {
+		cfg.AudioSource = "system"
+		if !cfg.VideoAudio {
+			cfg.AudioSource = "off"
+		}
 	}
 	cfg.path = configPath()
 	return cfg

@@ -40,7 +40,8 @@ type Recorder struct {
 }
 
 // startRecording begins a recording of region (screen coordinates).
-func (a *App) startRecording(region win.RECT, audio bool) {
+func (a *App) startRecording(region win.RECT, audioMode string) {
+	audio := audioMode != ""
 	if a.rec != nil {
 		return
 	}
@@ -79,10 +80,11 @@ func (a *App) startRecording(region win.RECT, audio bool) {
 	// declared with the real device rate
 	var cap *win.AudioCapture
 	if audio {
-		cap = openLoopback()
+		cap = openAudioSource(a.cfg.AudioSource, a.cfg.AudioDevice)
 		if cap != nil {
 			cfg.AudioRate = cap.Fmt.Rate
 			cfg.AudioChannels = cap.Fmt.Channels
+			logf("record: audio source=%s device=%s (%d Hz, %d ch)", a.cfg.AudioSource, cap.DeviceID, cap.Fmt.Rate, cap.Fmt.Channels)
 		}
 	}
 
@@ -240,6 +242,8 @@ func (r *Recorder) audioLoop(cap *win.AudioCapture) {
 	bytesPerFrame := channels * 2
 	pending := make([]byte, 0, rate*bytesPerFrame)
 	var written int64 // frames (samples per channel) already sent
+	loud := false
+	warned := false
 	ticker := time.NewTicker(15 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -278,6 +282,10 @@ func (r *Recorder) audioLoop(cap *win.AudioCapture) {
 			need = int64(len(pending))
 		}
 		chunk := pending[:need]
+		if !loud && hasSignal(chunk) {
+			loud = true
+			logf("record: audio signal detected")
+		}
 		ts := written * hnsPerSecond / int64(rate)
 		dur := int64(len(chunk)/bytesPerFrame) * hnsPerSecond / int64(rate)
 		if err := r.sw.WriteAudio(chunk, ts, dur); err != nil {
@@ -287,6 +295,11 @@ func (r *Recorder) audioLoop(cap *win.AudioCapture) {
 		written += int64(len(chunk) / bytesPerFrame)
 		pending = append(pending[:0], pending[need:]...)
 		r.audioOK.Store(true)
+		if !loud && !warned && time.Since(r.start) > 3*time.Second {
+			warned = true
+			logf("record: WARNING audio is silent so far (device %s) — muted device or nothing playing?", cap.DeviceID)
+			r.app.notify("Звук не пишется", "Похоже, на устройстве воспроизведения тишина. Проверьте, что звук идёт в колонки/наушники.")
+		}
 	}
 }
 
@@ -297,16 +310,22 @@ func (r *Recorder) fail(err error) {
 	})
 }
 
-func openLoopback() *win.AudioCapture {
+func openAudioSource(source, deviceFilter string) *win.AudioCapture {
 	ok := make(chan *win.AudioCapture, 1)
 	go func() {
 		if !win.ComInit() {
 			ok <- nil
 			return
 		}
-		cap, err := win.OpenLoopbackAudio()
+		var cap *win.AudioCapture
+		var err error
+		if source == "mic" {
+			cap, err = win.OpenMicrophoneAudio(deviceFilter)
+		} else {
+			cap, err = win.OpenLoopbackAudio(deviceFilter)
+		}
 		if err != nil {
-			logf("record: loopback unavailable: %v", err)
+			logf("record: audio source %q unavailable: %v", source, err)
 			ok <- nil
 			return
 		}
@@ -318,6 +337,17 @@ func openLoopback() *win.AudioCapture {
 	case <-time.After(3 * time.Second):
 		return nil
 	}
+}
+
+// hasSignal reports whether a PCM16 chunk is louder than noise.
+func hasSignal(pcm []byte) bool {
+	for i := 0; i+1 < len(pcm); i += 2 {
+		v := int16(uint16(pcm[i]) | uint16(pcm[i+1])<<8)
+		if v > 400 || v < -400 {
+			return true
+		}
+	}
+	return false
 }
 
 func clampToScreen(r win.RECT, screen win.RECT) win.RECT {

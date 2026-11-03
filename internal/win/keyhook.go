@@ -43,13 +43,70 @@ var (
 	keyFilter   KeyFilter
 	keyHookProc = syscall.NewCallback(keyboardProc)
 	hookHandle  uintptr
+
+	// Our own view of the modifier keys. GetAsyncKeyState lags behind the hook
+	// for the event being dispatched, which made Ctrl+<key> unreliable on some
+	// keyboards: the hook sees Ctrl go down but the async state still says up.
+	trackedCtrl, trackedAlt, trackedShift, trackedWin bool
 )
+
+// TrackModifier updates the tracked modifier state from a keyboard event.
+func TrackModifier(vk uint32, down bool) {
+	switch vk {
+	case VK_CONTROL, VK_LCONTROL, VK_RCONTROL:
+		trackedCtrl = down
+	case VK_MENU, VK_LMENU, VK_RMENU:
+		trackedAlt = down
+	case VK_SHIFT, VK_LSHIFT, VK_RSHIFT:
+		trackedShift = down
+	case VK_LWIN, VK_RWIN:
+		trackedWin = down
+	}
+}
+
+const (
+	VK_LCONTROL = 0xA2
+	VK_RCONTROL = 0xA3
+	VK_LMENU    = 0xA4
+	VK_RMENU    = 0xA5
+	VK_LSHIFT   = 0xA0
+	VK_RSHIFT   = 0xA1
+)
+
+// TrackedModifiers returns the modifier mask built from the events we have seen.
+func TrackedModifiers() uint32 {
+	var m uint32
+	if trackedCtrl {
+		m |= MOD_CONTROL
+	}
+	if trackedAlt {
+		m |= MOD_ALT
+	}
+	if trackedShift {
+		m |= MOD_SHIFT
+	}
+	if trackedWin {
+		m |= MOD_WIN
+	}
+	return m
+}
+
+// SeedModifiers initialises the tracked state from the current keyboard state so
+// a modifier that was already held when the hook started is not missed.
+func SeedModifiers() {
+	TrackModifier(VK_LCONTROL, keyDown(VK_CONTROL))
+	TrackModifier(VK_LMENU, keyDown(VK_MENU))
+	TrackModifier(VK_LSHIFT, keyDown(VK_SHIFT))
+	TrackModifier(VK_LWIN, keyDown(VK_LWIN))
+}
 
 func keyboardProc(nCode int32, wparam, lparam uintptr) uintptr {
 	if nCode == HC_ACTION && keyFilter != nil {
 		kb := (*KBDLLHOOKSTRUCT)(unsafe.Pointer(lparam))
 		down := wparam == WM_KEYDOWN_ || wparam == WM_SYSKEYDOWN_
-		mods := Modifiers()
+		TrackModifier(kb.VkCode, down)
+		// union of the tracked state and the async one: whichever is ahead wins
+		mods := TrackedModifiers() | Modifiers()
 		if keyFilter(kb.VkCode, down, mods) {
 			return 1 // swallowed
 		}
@@ -61,6 +118,7 @@ func keyboardProc(nCode int32, wparam, lparam uintptr) uintptr {
 // InstallKeyboardHook installs the global low level keyboard hook. It must be
 // called from the thread that runs the message loop.
 func InstallKeyboardHook(filter KeyFilter) bool {
+	SeedModifiers()
 	keyFilter = filter
 	h, _, _ := pSetWindowsHookExW.Call(WH_KEYBOARD_LL, keyHookProc, uintptr(GetModuleHandle()), 0)
 	hookHandle = h

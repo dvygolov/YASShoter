@@ -146,17 +146,30 @@ func (a *App) registerHotkeys() {
 }
 
 // keyFilter swallows the configured hotkeys and arms the capture / recording.
+// Matching is lenient about unexpected modifier bits for the video hotkey: a
+// stuck Win key or a keyboard that reports extra modifiers must not kill it.
 func (a *App) keyFilter(vk uint32, down bool, mods uint32) bool {
-	if vk == a.videoVK && mods == a.videoMods {
-		if down {
-			logf("hotkey: video (active=%v rec=%v)", a.active, a.rec != nil)
-			if !a.active {
-				a.hwnd.PostMessage(umHotkeyVideo, 0, 0)
-			}
+	// MOD_WIN is ignored on purpose: a stuck Windows key or a keyboard/driver that
+	// reports it spuriously must not disable the hotkeys.
+	const modMask = win.MOD_CONTROL | win.MOD_ALT | win.MOD_SHIFT
+	if vk == win.VK_SNAPSHOT && down {
+		logf("hook: PrintScreen down mods=%#x (video wants %#x, shot wants %#x)", mods, a.videoMods, a.hotkeyMods)
+	}
+
+	if vk == a.videoVK && down && (mods&modMask) == (a.videoMods&modMask) {
+		if a.active {
+			logf("hook: video hotkey ignored, capture in progress")
+			return true
 		}
+		logf("hook: video hotkey -> recording (rec=%v)", a.rec != nil)
+		a.hwnd.PostMessage(umHotkeyVideo, 0, 0)
 		return true
 	}
-	if vk != a.hotkeyVK || mods != a.hotkeyMods {
+	if vk == a.videoVK && (mods&modMask) == (a.videoMods&modMask) {
+		return true // swallow the key up as well
+	}
+
+	if vk != a.hotkeyVK || (mods&modMask) != (a.hotkeyMods&modMask) {
 		return false
 	}
 	if down {
@@ -285,7 +298,14 @@ func (a *App) showTrayMenu() {
 		m.Add(cmdCapture, "Снимок области\tPrintScreen", false)
 		m.Default(cmdCapture)
 		m.Add(cmdRecord, "Запись видео\tCtrl+PrintScreen", false)
-		m.Add(cmdAudioOn, "Записывать со звуком", a.cfg.VideoAudio)
+		audioLabel := "Звук: система"
+		switch a.cfg.AudioSource {
+		case "mic":
+			audioLabel = "Звук: микрофон"
+		case "off":
+			audioLabel = "Звук: выкл"
+		}
+		m.Add(cmdAudioOn, audioLabel, a.cfg.AudioSource != "off")
 		m.Add(cmdCursorOn, "Показывать курсор", a.cfg.VideoCursor)
 	}
 	m.Separator()
@@ -308,7 +328,15 @@ func (a *App) showTrayMenu() {
 	case cmdRecord:
 		a.toggleRecording()
 	case cmdAudioOn:
-		a.cfg.VideoAudio = !a.cfg.VideoAudio
+		switch a.cfg.AudioSource {
+		case "system":
+			a.cfg.AudioSource = "mic"
+		case "mic":
+			a.cfg.AudioSource = "off"
+		default:
+			a.cfg.AudioSource = "system"
+		}
+		a.cfg.VideoAudio = a.cfg.AudioSource != "off"
 		a.cfg.save()
 	case cmdCursorOn:
 		a.cfg.VideoCursor = !a.cfg.VideoCursor
@@ -375,7 +403,11 @@ func (a *App) startCapture(mode overlayMode) {
 	if a.overlay == nil {
 		a.overlay = newOverlay(a)
 	}
-	a.overlay.show(mode, a.cfg.VideoAudio)
+	audioMode := a.cfg.AudioSource
+	if !a.cfg.VideoAudio {
+		audioMode = ""
+	}
+	a.overlay.show(mode, audioMode)
 	t3 := win.GetTickCount()
 	logf("timings: capture=%dms dim=%dms overlay=%dms (total %dms)", t1-t0, t2-t1, t3-t2, t3-t0)
 	logf("overlay shown screen=%d,%d %dx%d windows=%d", screen.Left, screen.Top, screen.W(), screen.H(), len(a.overlay.windows))
