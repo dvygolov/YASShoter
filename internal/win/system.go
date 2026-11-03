@@ -105,6 +105,16 @@ func (t *Tray) Balloon(title, text string, flags uint32) {
 	d.UFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
 }
 
+// SetTip updates the hover tooltip.
+func (t *Tray) SetTip(tip string) {
+	if t == nil {
+		return
+	}
+	CopyUTF16(t.data.SzTip[:], tip)
+	t.data.UFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
+	pShellNotifyIconW.Call(NIM_MODIFY, uintptr(unsafe.Pointer(&t.data)))
+}
+
 // Refresh re-registers the icon so the shell picks up new settings.
 func (t *Tray) Refresh() {
 	pShellNotifyIconW.Call(NIM_DELETE, uintptr(unsafe.Pointer(&t.data)))

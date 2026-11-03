@@ -329,8 +329,11 @@ func PrimaryScreen() RECT {
 	return RECT{0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)}
 }
 
+// MonitorFromPoint takes the POINT by value: on x64 the 8-byte struct travels
+// in a single register, so x and y have to be packed together.
 func MonitorFromPoint(p POINT) HWND {
-	r, _, _ := pMonitorFromPoint.Call(uintptr(p.X), uintptr(p.Y), 0)
+	packed := uintptr(uint32(p.X)) | uintptr(uint32(p.Y))<<32
+	r, _, _ := pMonitorFromPoint.Call(packed, 0)
 	return HWND(r)
 }
 

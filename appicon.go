@@ -44,3 +44,19 @@ func drawAppIcon() win.HICON {
 	icon := win.IconFromDib(d)
 	return icon
 }
+
+// makeRecordIcon draws the "recording" tray icon: red disc with a white square.
+func makeRecordIcon() win.HICON {
+	const s = 32
+	d, err := win.NewDib(s, s)
+	if err != nil {
+		return 0
+	}
+	defer d.Close()
+	d.FillConstant(0)
+	cx, cy := float64(s)/2, float64(s)/2
+	d.FillCircle(cx, cy, 15, 0xDC2626)
+	d.EllipseOutline(cx, cy, 15, 15, 1, 0x7F1D1D)
+	d.FillRectColor(win.RECT{11, 11, 21, 21}, 0xFFFFFF)
+	return win.IconFromDib(d)
+}

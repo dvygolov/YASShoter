@@ -9,6 +9,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/dvygolov/yasshoter/internal/win"
@@ -32,11 +33,25 @@ type App struct {
 
 	taskbarMsg    uint32
 	pendingUpdate bool
-	hotkeyID      int32
-	altHotkeyID   int32
-	hotkeyMods    uint32
-	hotkeyVK      uint32
+
+	rec          *Recorder
+	recIcon      win.HICON
+	recMu        sync.Mutex
+	recSavedPath string
+	recSavedErr  string
+	hotkeyID     int32
+	altHotkeyID  int32
+	hotkeyMods   uint32
+	hotkeyVK     uint32
+	videoMods    uint32
+	videoVK      uint32
 }
+
+const (
+	umHotkeyShot     = win.WM_APP + 20
+	umHotkeyVideo    = win.WM_APP + 21
+	umRecordingSaved = win.WM_APP + 22
+)
 
 const (
 	cmdCapture  = 1
@@ -46,6 +61,9 @@ const (
 	cmdQuit     = 5
 	cmdCheckUpd = 6
 	cmdDoUpdate = 7
+	cmdRecord   = 8
+	cmdStopRec  = 9
+	cmdAudioOn  = 10
 )
 
 func runApp() {
@@ -104,6 +122,8 @@ func runApp() {
 
 func (a *App) registerHotkeys() {
 	a.hotkeyMods, a.hotkeyVK = parseHotkey(a.cfg.Hotkey)
+	vm, vk := parseHotkey(a.cfg.HotkeyVideo)
+	a.videoMods, a.videoVK = vm, vk
 	// The primary hotkey goes through a low level keyboard hook: on Windows 11 the
 	// shell owns PrintScreen, so RegisterHotKey reports "already registered"
 	// (error 1409) and the Snipping Tool would win the race.
@@ -124,8 +144,14 @@ func (a *App) registerHotkeys() {
 	}
 }
 
-// keyFilter swallows the configured hotkey and arms the capture.
+// keyFilter swallows the configured hotkeys and arms the capture / recording.
 func (a *App) keyFilter(vk uint32, down bool, mods uint32) bool {
+	if vk == a.videoVK && mods == a.videoMods {
+		if down && !a.active {
+			a.hwnd.PostMessage(umHotkeyVideo, 0, 0)
+		}
+		return true
+	}
 	if vk != a.hotkeyVK || mods != a.hotkeyMods {
 		return false
 	}
@@ -133,7 +159,7 @@ func (a *App) keyFilter(vk uint32, down bool, mods uint32) bool {
 		if a.active {
 			return true // already capturing: ignore the repeat
 		}
-		a.hwnd.PostMessage(win.WM_CAPTURED, 0, 0)
+		a.hwnd.PostMessage(umHotkeyShot, 0, 0)
 	}
 	return true
 }
@@ -169,13 +195,25 @@ func (a *App) wndProc(hwnd win.HWND, msg uint32, wp, lp uintptr) uintptr {
 	switch msg {
 	case win.WM_HOTKEY:
 		if !a.active {
-			a.startCapture()
+			a.startCapture(modeShot)
 		}
 		return 0
+	case umHotkeyShot:
+		a.startCapture(modeShot)
+		return 0
+	case umHotkeyVideo:
+		a.toggleRecording()
+		return 0
+	case umRecordingSaved:
+		a.onRecordingSaved()
+		return 0
 	case win.WM_CAPTURED:
-		a.startCapture()
+		a.startCapture(modeShot)
 		return 0
 	case win.WM_TIMER:
+		if wp == 4 {
+			a.updateRecTooltip()
+		}
 		if wp == 2 {
 			win.KillTimer(hwnd, 2)
 			a.requestUpdateCheck(false)
@@ -200,9 +238,13 @@ func (a *App) wndProc(hwnd win.HWND, msg uint32, wp, lp uintptr) uintptr {
 	case win.WM_TRAYICON:
 		switch uint32(lp) & 0xFFFF {
 		case win.WM_LBUTTONUP:
-			a.startCapture()
+			if a.rec != nil {
+				a.stopRecording()
+			} else {
+				a.startCapture(modeShot)
+			}
 		case win.WM_LBUTTONDBLCLK:
-			a.startCapture()
+			a.startCapture(modeShot)
 		case win.WM_RBUTTONUP, win.WM_CONTEXTMENU:
 			a.showTrayMenu()
 		}
@@ -232,8 +274,15 @@ func (a *App) wndProc(hwnd win.HWND, msg uint32, wp, lp uintptr) uintptr {
 func (a *App) showTrayMenu() {
 	m := win.NewPopupMenu()
 	defer m.Destroy()
-	m.Add(cmdCapture, "Захват области\tPrintScreen", false)
-	m.Default(cmdCapture)
+	if a.rec != nil {
+		m.Add(cmdStopRec, "Остановить запись\tCtrl+PrintScreen", false)
+		m.Default(cmdStopRec)
+	} else {
+		m.Add(cmdCapture, "Снимок области\tPrintScreen", false)
+		m.Default(cmdCapture)
+		m.Add(cmdRecord, "Запись видео\tCtrl+PrintScreen", false)
+		m.Add(cmdAudioOn, "Записывать со звуком", a.cfg.VideoAudio)
+	}
 	m.Separator()
 	m.Add(cmdFolder, "Открыть папку сохранения", false)
 	m.Add(cmdConfig, "Настройки (config.json)", false)
@@ -250,7 +299,14 @@ func (a *App) showTrayMenu() {
 	m.Add(cmdQuit, "Выход", false)
 	switch m.Track(a.hwnd) {
 	case cmdCapture:
-		a.startCapture()
+		a.startCapture(modeShot)
+	case cmdRecord:
+		a.toggleRecording()
+	case cmdAudioOn:
+		a.cfg.VideoAudio = !a.cfg.VideoAudio
+		a.cfg.save()
+	case cmdStopRec:
+		a.stopRecording()
 	case cmdFolder:
 		win.ShellExecute("open", a.cfg.SaveDir, "", "", win.SW_SHOWNORMAL)
 	case cmdConfig:
@@ -272,8 +328,9 @@ func (a *App) showTrayMenu() {
 
 // startCapture freezes the screen and opens the selection overlay. This is the
 // hot path: capture + dim + show must stay in the tens of milliseconds.
-func (a *App) startCapture() {
-	if a.active {
+func (a *App) startCapture(mode overlayMode) {
+	if a.active || a.rec != nil {
+		// a screenshot while recording would freeze the screen into the video
 		return
 	}
 	start := win.GetTickCount()
@@ -310,7 +367,7 @@ func (a *App) startCapture() {
 	if a.overlay == nil {
 		a.overlay = newOverlay(a)
 	}
-	a.overlay.show()
+	a.overlay.show(mode, a.cfg.VideoAudio)
 	t3 := win.GetTickCount()
 	logf("timings: capture=%dms dim=%dms overlay=%dms (total %dms)", t1-t0, t2-t1, t3-t2, t3-t0)
 	logf("overlay shown screen=%d,%d %dx%d windows=%d", screen.Left, screen.Top, screen.W(), screen.H(), len(a.overlay.windows))
@@ -337,6 +394,60 @@ func (a *App) afterCapture() {
 			a.notify("Обновление", err.Error())
 		}
 	}
+}
+
+// toggleRecording starts the video overlay or stops an active recording.
+func (a *App) toggleRecording() {
+	if a.rec != nil {
+		a.stopRecording()
+		return
+	}
+	a.startCapture(modeVideo)
+}
+
+// enterRecordingUI switches the tray icon to the red "recording" state.
+func (a *App) enterRecordingUI() {
+	if a.recIcon == 0 {
+		a.recIcon = makeRecordIcon()
+	}
+	if a.tray != nil {
+		a.tray.SetIcon(a.recIcon)
+		a.updateRecTooltip()
+	}
+	win.SetTimer(a.hwnd, 4, 1000)
+}
+
+func (a *App) leaveRecordingUI() {
+	win.KillTimer(a.hwnd, 4)
+	if a.tray != nil {
+		a.tray.SetIcon(a.icon)
+		a.tray.SetTip(appTitle + " — PrintScreen: снимок, Ctrl+PrintScreen: видео")
+	}
+}
+
+func (a *App) updateRecTooltip() {
+	r := a.rec
+	if a.tray == nil || r == nil {
+		return
+	}
+	el := r.elapsed()
+	tip := "● Запись " + el.Truncate(time.Second).String() + " · Ctrl+PrintScreen — стоп"
+	if !r.audio {
+		tip += " · без звука"
+	}
+	a.tray.SetTip(tip)
+}
+
+func (a *App) onRecordingSaved() {
+	a.recMu.Lock()
+	path, errMsg := a.recSavedPath, a.recSavedErr
+	a.recSavedPath, a.recSavedErr = "", ""
+	a.recMu.Unlock()
+	if errMsg != "" {
+		a.notify("Запись", "Ошибка: "+errMsg)
+		return
+	}
+	a.notify("Видео сохранено", filepath.Base(path))
 }
 
 // onUpdateReady reacts to a downloaded update.

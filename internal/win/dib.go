@@ -237,6 +237,14 @@ func CreateFont(size int32, weight int32, face string) HFONT {
 	return HFONT(h)
 }
 
+// ColorRef converts 0xRRGGBB into a GDI COLORREF (0x00BBGGRR).
+func ColorRef(rgb uint32) uint32 {
+	r := (rgb >> 16) & 0xFF
+	g := (rgb >> 8) & 0xFF
+	b := rgb & 0xFF
+	return b<<16 | g<<8 | r
+}
+
 func CreateSolidBrush(c uint32) HBRUSH {
 	h, _, _ := pCreateSolidBrush.Call(uintptr(c & 0x00FFFFFF))
 	return HBRUSH(h)

@@ -20,9 +20,18 @@ const (
 // invalidates the rectangle that actually changed. A layered window would push
 // the whole ~18 MB frame to the compositor on every mouse move; this repaints a
 // few thousand pixels instead, so dragging stays smooth even on old GPUs.
+type overlayMode int
+
+const (
+	modeShot overlayMode = iota
+	modeVideo
+)
+
 type Overlay struct {
-	app  *App
-	hwnd win.HWND
+	app   *App
+	hwnd  win.HWND
+	mode  overlayMode
+	audio bool
 
 	windows []win.WindowInfo
 
@@ -79,10 +88,12 @@ func (o *Overlay) fit() {
 	}
 }
 
-func (o *Overlay) show() {
+func (o *Overlay) show(mode overlayMode, audio bool) {
 	if o.hwnd == 0 {
 		return
 	}
+	o.mode = mode
+	o.audio = audio
 	o.fit()
 	// the overlay spans every monitor, so the label follows the one under the cursor
 	o.dpi = win.DpiForPoint(win.GetCursorPos())
@@ -92,7 +103,7 @@ func (o *Overlay) show() {
 		o.stroke = 1
 	}
 	o.setFontDpi(o.dpi)
-	logf("overlay: dpi=%d scale=%.2f", o.dpi, o.s)
+	logf("overlay: mode=%d audio=%v dpi=%d scale=%.2f", o.mode, o.audio, o.dpi, o.s)
 	o.windows = win.CapturableWindows(win.SelfPID(), o.app.screen)
 	o.hover = win.RECT{}
 	o.hasHover = false
@@ -238,6 +249,17 @@ func (o *Overlay) drawLabel(target win.RECT, dragging bool) win.RECT {
 	if !dragging && o.hoverTitle != "" {
 		text = o.hoverTitle + "   " + text
 	}
+	if o.mode == modeVideo {
+		audio := "звук выкл"
+		if o.audio {
+			audio = "звук вкл"
+		}
+		if dragging {
+			text = "● ВИДЕО · " + audio + " · " + text
+		} else {
+			text = "● ВИДЕО · " + audio + " · Enter — весь экран · M — звук"
+		}
+	}
 	old := win.SelectObject(o.app.frame.DC, win.HGDIOBJ(o.font))
 	sz := win.TextExtent(o.app.frame.DC, text)
 	win.SelectObject(o.app.frame.DC, old)
@@ -278,8 +300,31 @@ func (o *Overlay) finish(sel win.RECT) {
 		Right:  sel.Right + o.app.screen.Left,
 		Bottom: sel.Bottom + o.app.screen.Top,
 	}
+	if o.mode == modeVideo {
+		// the frozen frame is not needed once the encoder owns its own buffer
+		o.app.afterCapture()
+		o.app.startRecording(screen, o.audio)
+		return
+	}
 	o.hide()
 	o.app.startEditor(screen)
+}
+
+// monitorRect returns the work area of the monitor under the cursor, in frozen
+// frame coordinates.
+func (o *Overlay) monitorRect() win.RECT {
+	m := win.MonitorFromPoint(win.GetCursorPos())
+	mi := m.MonitorInfo()
+	if mi.RcMonitor.Empty() {
+		return o.clip(win.RECT{0, 0, o.app.screen.W(), o.app.screen.H()})
+	}
+	r := mi.RcMonitor
+	return o.clip(win.RECT{
+		Left:   r.Left - o.app.screen.Left,
+		Top:    r.Top - o.app.screen.Top,
+		Right:  r.Right - o.app.screen.Left,
+		Bottom: r.Bottom - o.app.screen.Top,
+	})
 }
 
 func (o *Overlay) cancel() {
@@ -345,10 +390,22 @@ func (o *Overlay) wndProc(hwnd win.HWND, msg uint32, wp, lp uintptr) uintptr {
 		case win.VK_ESCAPE:
 			o.cancel()
 		case win.VK_RETURN:
+			if o.mode == modeVideo {
+				// Enter records the monitor under the cursor
+				o.finish(o.monitorRect())
+				return 0
+			}
 			if o.hasHover {
 				o.finish(o.hover)
 			} else if !o.dragRect().Empty() {
 				o.finish(o.dragRect())
+			}
+		case win.VK_M:
+			if o.mode == modeVideo {
+				o.audio = !o.audio
+				o.app.cfg.VideoAudio = o.audio
+				o.app.cfg.save()
+				o.refresh()
 			}
 		}
 		return 0

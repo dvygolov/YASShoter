@@ -23,6 +23,9 @@ type Config struct {
 	Color            string  `json:"color"`
 	Thickness        float64 `json:"thickness"`
 	Hotkey           string  `json:"hotkey"`
+	HotkeyVideo      string  `json:"hotkeyVideo"`
+	VideoFps         int     `json:"videoFps"`
+	VideoAudio       bool    `json:"videoAudio"`
 	AutoStart        bool    `json:"autoStart"`
 	CopyToClipboard  bool    `json:"copyToClipboard"`
 	DisableSnipping  bool    `json:"disableSnippingToolPrintScreen"`
@@ -47,6 +50,9 @@ func defaultConfig() *Config {
 		Color:            "FF3B30",
 		Thickness:        4,
 		Hotkey:           "PrintScreen",
+		HotkeyVideo:      "Ctrl+PrintScreen",
+		VideoFps:         30,
+		VideoAudio:       false,
 		AutoStart:        true,
 		CopyToClipboard:  true,
 		DisableSnipping:  false,
