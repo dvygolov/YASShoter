@@ -256,6 +256,8 @@ func (o *Overlay) drawLabel(target win.RECT, dragging bool) win.RECT {
 			audio = "звук: система"
 		case "mic":
 			audio = "звук: микрофон"
+		case "mix":
+			audio = "звук: система+микрофон"
 		}
 		if dragging {
 			text = "● ВИДЕО · " + audio + " · " + text
@@ -413,6 +415,8 @@ func (o *Overlay) wndProc(hwnd win.HWND, msg uint32, wp, lp uintptr) uintptr {
 					o.audio = "system"
 				case "system":
 					o.audio = "mic"
+				case "mic":
+					o.audio = "mix"
 				default:
 					o.audio = ""
 				}

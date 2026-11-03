@@ -31,9 +31,10 @@ type App struct {
 	editor  *Editor
 	active  bool
 
-	taskbarMsg    uint32
-	pendingUpdate bool
-	menuDevices   []win.RenderDevice
+	taskbarMsg     uint32
+	pendingUpdate  bool
+	menuDevices    []win.RenderDevice
+	menuMicDevices []win.RenderDevice
 
 	rec          *Recorder
 	recIcon      win.HICON
@@ -57,24 +58,27 @@ const (
 )
 
 const (
-	cmdCapture       = 1
-	cmdFolder        = 2
-	cmdConfig        = 3
-	cmdAuto          = 4
-	cmdQuit          = 5
-	cmdCheckUpd      = 6
-	cmdDoUpdate      = 7
-	cmdRecord        = 8
-	cmdStopRec       = 9
-	cmdAudioOn       = 10
-	cmdCursorOn      = 11
-	cmdAudioOff      = 12
-	cmdAudioSystem   = 13
-	cmdAudioMic      = 14
-	cmdDeviceDefault = 15
+	cmdCapture          = 1
+	cmdFolder           = 2
+	cmdConfig           = 3
+	cmdAuto             = 4
+	cmdQuit             = 5
+	cmdCheckUpd         = 6
+	cmdDoUpdate         = 7
+	cmdRecord           = 8
+	cmdStopRec          = 9
+	cmdAudioOn          = 10
+	cmdCursorOn         = 11
+	cmdAudioOff         = 12
+	cmdAudioSystem      = 13
+	cmdAudioMic         = 14
+	cmdDeviceDefault    = 15
+	cmdAudioMix         = 16
+	cmdDeviceMicDefault = 17
 
-	// device menu items live in this id range
-	cmdDeviceBase = 200
+	// device menu items live in these id ranges
+	cmdDeviceBase    = 200
+	cmdDeviceMicBase = 400
 )
 
 func runApp() {
@@ -336,10 +340,13 @@ func (a *App) buildTrayMenu() *win.Menu {
 	srcMenu.Add(cmdAudioOff, "Без звука", a.cfg.AudioSource == "off")
 	srcMenu.Add(cmdAudioSystem, "Система (то, что играет)", a.cfg.AudioSource == "system")
 	srcMenu.Add(cmdAudioMic, "Микрофон", a.cfg.AudioSource == "mic")
+	srcMenu.Add(cmdAudioMix, "Система + микрофон", a.cfg.AudioSource == "mix")
 	srcLabel := "Звук: "
 	switch a.cfg.AudioSource {
 	case "mic":
 		srcLabel += "микрофон"
+	case "mix":
+		srcLabel += "система + микрофон"
 	case "off":
 		srcLabel += "выкл"
 	default:
@@ -347,23 +354,38 @@ func (a *App) buildTrayMenu() *win.Menu {
 	}
 	m.Submenu(srcLabel, srcMenu)
 
-	// device list for the current source
-	a.menuDevices = listAudioDevices(a.cfg.AudioSource == "mic")
-	devMenu := win.NewPopupMenu()
-	devMenu.Add(cmdDeviceDefault, "По умолчанию (как в Windows)", a.cfg.AudioDevice == "")
-	selectedName := "по умолчанию"
-	for i, d := range a.menuDevices {
-		checked := a.cfg.AudioDevice != "" && d.ID == a.cfg.AudioDevice
-		if checked {
-			selectedName = d.Name
+	// device pickers: playback endpoints for the system, recording ones for the mic
+	withSystem := a.cfg.AudioSource == "system" || a.cfg.AudioSource == "mix"
+	withMic := a.cfg.AudioSource == "mic" || a.cfg.AudioSource == "mix"
+
+	if withSystem {
+		a.menuDevices = listAudioDevices(false)
+		devMenu := win.NewPopupMenu()
+		devMenu.Add(cmdDeviceDefault, "По умолчанию (как в Windows)", a.cfg.AudioDevice == "")
+		name := "по умолчанию"
+		for i, d := range a.menuDevices {
+			checked := a.cfg.AudioDevice != "" && d.ID == a.cfg.AudioDevice
+			if checked {
+				name = d.Name
+			}
+			devMenu.Add(uint32(cmdDeviceBase+i), shorten(deviceLabel(d, i), 52), checked)
 		}
-		name := d.Name
-		if name == "" {
-			name = "Устройство " + itoa(int64(i+1))
-		}
-		devMenu.Add(uint32(cmdDeviceBase+i), shorten(name, 48), checked)
+		m.Submenu("Устройство системы: "+shorten(name, 32), devMenu)
 	}
-	m.Submenu("Устройство: "+selectedName, devMenu)
+	if withMic {
+		a.menuMicDevices = listAudioDevices(true)
+		micMenu := win.NewPopupMenu()
+		micMenu.Add(cmdDeviceMicDefault, "По умолчанию (как в Windows)", a.cfg.AudioDeviceMic == "")
+		name := "по умолчанию"
+		for i, d := range a.menuMicDevices {
+			checked := a.cfg.AudioDeviceMic != "" && d.ID == a.cfg.AudioDeviceMic
+			if checked {
+				name = d.Name
+			}
+			micMenu.Add(uint32(cmdDeviceMicBase+i), shorten(deviceLabel(d, i), 52), checked)
+		}
+		m.Submenu("Микрофон (запись): "+shorten(name, 32), micMenu)
+	}
 
 	m.Add(cmdCursorOn, "Показывать курсор", a.cfg.VideoCursor)
 	m.Separator()
@@ -392,12 +414,14 @@ func (a *App) handleTrayCommand(cmd uint32) {
 		a.toggleRecording()
 	case cmd == cmdStopRec:
 		a.stopRecording()
-	case cmd == cmdAudioOff, cmd == cmdAudioSystem, cmd == cmdAudioMic:
+	case cmd == cmdAudioOff, cmd == cmdAudioSystem, cmd == cmdAudioMic, cmd == cmdAudioMix:
 		switch cmd {
 		case cmdAudioOff:
 			a.cfg.AudioSource = "off"
 		case cmdAudioSystem:
 			a.cfg.AudioSource = "system"
+		case cmdAudioMix:
+			a.cfg.AudioSource = "mix"
 		default:
 			a.cfg.AudioSource = "mic"
 		}
@@ -408,13 +432,24 @@ func (a *App) handleTrayCommand(cmd uint32) {
 	case cmd == cmdDeviceDefault:
 		a.cfg.AudioDevice = ""
 		a.cfg.save()
-		logf("menu: audio device -> default")
+		logf("menu: system audio device -> default")
+		a.probeSelectedDevice("")
+	case cmd == cmdDeviceMicDefault:
+		a.cfg.AudioDeviceMic = ""
+		a.cfg.save()
+		logf("menu: microphone device -> default")
 		a.probeSelectedDevice("")
 	case cmd >= cmdDeviceBase && int(cmd) < cmdDeviceBase+len(a.menuDevices):
 		d := a.menuDevices[cmd-cmdDeviceBase]
 		a.cfg.AudioDevice = d.ID
 		a.cfg.save()
-		logf("menu: audio device -> %s (%s)", d.Name, d.ID)
+		logf("menu: system audio device -> %s (%s)", d.Name, d.ID)
+		a.probeSelectedDevice(d.ID)
+	case cmd >= cmdDeviceMicBase && int(cmd) < cmdDeviceMicBase+len(a.menuMicDevices):
+		d := a.menuMicDevices[cmd-cmdDeviceMicBase]
+		a.cfg.AudioDeviceMic = d.ID
+		a.cfg.save()
+		logf("menu: microphone device -> %s (%s)", d.Name, d.ID)
 		a.probeSelectedDevice(d.ID)
 	case cmd == cmdFolder:
 		win.ShellExecute("open", a.cfg.SaveDir, "", "", win.SW_SHOWNORMAL)
@@ -433,6 +468,14 @@ func (a *App) handleTrayCommand(cmd uint32) {
 	case cmd == cmdQuit:
 		a.hwnd.PostMessage(win.WM_CLOSE, 0, 0)
 	}
+}
+
+// deviceLabel renders a device for the menu, falling back to an index.
+func deviceLabel(d win.RenderDevice, i int) string {
+	if d.Name != "" {
+		return d.Name
+	}
+	return "Устройство " + itoa(int64(i+1))
 }
 
 // listAudioDevices enumerates endpoints for the given source.
@@ -471,13 +514,15 @@ func (a *App) probeSelectedDevice(deviceID string) {
 	if source == "off" {
 		source = "system"
 	}
+	// in mix mode both endpoints are used: probe the one that was just chosen
+	mic := source == "mic" || (source == "mix" && deviceID == a.cfg.AudioDeviceMic && deviceID != "")
 	go func() {
 		if !win.ComInit() {
 			return
 		}
 		var cap *win.AudioCapture
 		var err error
-		if source == "mic" {
+		if mic {
 			cap, err = win.OpenMicrophoneAudio(deviceID)
 		} else {
 			cap, err = win.OpenLoopbackAudio(deviceID)

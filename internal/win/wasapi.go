@@ -24,15 +24,22 @@ var (
 
 const (
 	AUDCLNT_STREAMFLAGS_LOOPBACK = 0x00020000
-	AUDCLNT_BUFFERFLAGS_SILENT   = 0x00000002
-	eRender                      = 0
-	eCapture                     = 1
-	eConsole                     = 0
-	eMultimedia                  = 1
-	eCommunications              = 2
-	WAVE_FORMAT_PCM              = 1
-	WAVE_FORMAT_IEEE_FLOAT       = 3
-	WAVE_FORMAT_EXTENSIBLE       = 0xFFFE
+	// let the audio engine convert to the format we ask for (Win10+)
+	AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM      = 0x80000000
+	AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY = 0x08000000
+	AUDCLNT_BUFFERFLAGS_SILENT              = 0x00000002
+	eRender                                 = 0
+	eCapture                                = 1
+
+	// mixing format used when two sources are recorded together
+	mixRate                = 48000
+	mixChannels            = 2
+	eConsole               = 0
+	eMultimedia            = 1
+	eCommunications        = 2
+	WAVE_FORMAT_PCM        = 1
+	WAVE_FORMAT_IEEE_FLOAT = 3
+	WAVE_FORMAT_EXTENSIBLE = 0xFFFE
 )
 
 type waveFormatEx struct {
@@ -60,6 +67,7 @@ type AudioCapture struct {
 	Fmt      AudioFormat
 	isFloat  bool
 	DeviceID string
+	Name     string
 	buf      []byte
 }
 
@@ -167,15 +175,25 @@ func propVariantClear(pv *propVariant) {
 // OpenLoopbackAudio captures a playback device (system sound). deviceFilter is a
 // substring of the endpoint id; an empty string means "the system default".
 func OpenLoopbackAudio(deviceFilter string) (*AudioCapture, error) {
-	return openAudio(deviceFilter, true)
+	return openAudio(deviceFilter, true, false)
 }
 
-// OpenMicrophoneAudio captures the default recording device (microphone).
+// OpenMicrophoneAudio captures a recording device (microphone).
 func OpenMicrophoneAudio(deviceFilter string) (*AudioCapture, error) {
-	return openAudio(deviceFilter, false)
+	return openAudio(deviceFilter, false, false)
 }
 
-func openAudio(deviceFilter string, loopback bool) (*AudioCapture, error) {
+// OpenLoopbackAudio48 and OpenMicrophoneAudio48 ask the audio engine to convert
+// to 48 kHz stereo 16 bit, so two sources can be mixed sample by sample.
+func OpenLoopbackAudio48(deviceFilter string) (*AudioCapture, error) {
+	return openAudio(deviceFilter, true, true)
+}
+
+func OpenMicrophoneAudio48(deviceFilter string) (*AudioCapture, error) {
+	return openAudio(deviceFilter, false, true)
+}
+
+func openAudio(deviceFilter string, loopback, forceStereo bool) (*AudioCapture, error) {
 	a := &AudioCapture{}
 	enum, hr := ComCreateInstance(CLSIDMMDeviceEnumerator, IIDIMMDeviceEnumerator)
 	if HRFailed(hr) || enum == nil {
@@ -235,16 +253,43 @@ func openAudio(deviceFilter string, loopback bool) (*AudioCapture, error) {
 		return nil, errors.New("bogus mix format")
 	}
 
-	// IAudioClient::Initialize (index 3), 1 s shared buffer
+	// IAudioClient::Initialize (index 3), shared mode, 2 s buffer
 	var flags uintptr
 	if loopback {
 		flags = AUDCLNT_STREAMFLAGS_LOOPBACK
 	}
-	hr = comCall(client, 3, 0 /*shared*/, flags, 2*HNSperSecond, 0, uintptr(wfx), 0)
+	initFormat := uintptr(wfx)
+	var custom *waveFormatEx
+	if forceStereo && (a.Fmt.Rate != mixRate || a.Fmt.Channels != mixChannels) {
+		custom = &waveFormatEx{
+			FormatTag:      WAVE_FORMAT_PCM,
+			Channels:       mixChannels,
+			SamplesPerSec:  mixRate,
+			AvgBytesPerSec: mixRate * mixChannels * 2,
+			BlockAlign:     mixChannels * 2,
+			BitsPerSample:  16,
+		}
+		flags |= AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
+		initFormat = uintptr(unsafe.Pointer(custom))
+	}
+	hr = comCall(client, 3, 0 /*shared*/, flags, 2*HNSperSecond, 0, initFormat, 0)
+	if HRFailed(hr) && custom != nil {
+		// no auto conversion on this endpoint: fall back to its own format
+		flags &^= AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
+		hr = comCall(client, 3, 0, flags, 2*HNSperSecond, 0, uintptr(wfx), 0)
+		if !HRFailed(hr) {
+			custom = nil
+		}
+	}
+	if custom != nil {
+		a.Fmt.Rate = int(mixRate)
+		a.Fmt.Channels = int(mixChannels)
+		a.isFloat = false
+	}
 	pCoTaskMemFree.Call(uintptr(wfx))
 	if HRFailed(hr) {
 		a.Close()
-		return nil, fmt.Errorf("Initialize(loopback) 0x%08x", uint32(hr))
+		return nil, fmt.Errorf("Initialize 0x%08x", uint32(hr))
 	}
 
 	// IAudioClient::GetService (index 14)
@@ -260,6 +305,9 @@ func openAudio(deviceFilter string, loopback bool) (*AudioCapture, error) {
 	// record which endpoint we are listening to, for the log
 	if id, err := deviceID(dev); err == nil {
 		a.DeviceID = id
+	}
+	if name, err := deviceName(dev); err == nil {
+		a.Name = name
 	}
 
 	// IAudioClient::Start (index 10)

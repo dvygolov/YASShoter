@@ -31,7 +31,9 @@ type Config struct {
 	AudioSource string `json:"audioSource"`
 	// AudioDevice is a substring of the WASAPI endpoint id to record from;
 	// empty means the system default playback device.
-	AudioDevice     string `json:"audioDevice"`
+	AudioDevice string `json:"audioDevice"`
+	// AudioDeviceMic is the recording endpoint used for the microphone source.
+	AudioDeviceMic  string `json:"audioDeviceMic"`
 	AutoStart       bool   `json:"autoStart"`
 	CopyToClipboard bool   `json:"copyToClipboard"`
 	DisableSnipping bool   `json:"disableSnippingToolPrintScreen"`
@@ -98,7 +100,7 @@ func loadConfig() *Config {
 	if cfg.Color == "" {
 		cfg.Color = "FF3B30"
 	}
-	if cfg.AudioSource != "mic" && cfg.AudioSource != "off" && cfg.AudioSource != "system" {
+	if cfg.AudioSource != "mic" && cfg.AudioSource != "off" && cfg.AudioSource != "system" && cfg.AudioSource != "mix" {
 		cfg.AudioSource = "system"
 		if !cfg.VideoAudio {
 			cfg.AudioSource = "off"

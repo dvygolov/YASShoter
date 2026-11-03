@@ -78,13 +78,15 @@ func (a *App) startRecording(region win.RECT, audioMode string) {
 	cfg := win.MediaConfig{Width: w, Height: h, FPS: fps, Bitrate: bitrate, Audio: audio}
 	// probe the loopback format before opening the file so the audio stream is
 	// declared with the real device rate
-	var cap *win.AudioCapture
+	var caps []*win.AudioCapture
 	if audio {
-		cap = openAudioSource(a.cfg.AudioSource, a.cfg.AudioDevice)
-		if cap != nil {
-			cfg.AudioRate = cap.Fmt.Rate
-			cfg.AudioChannels = cap.Fmt.Channels
-			logf("record: audio source=%s device=%s (%d Hz, %d ch)", a.cfg.AudioSource, cap.DeviceID, cap.Fmt.Rate, cap.Fmt.Channels)
+		caps = openAudioSources(a.cfg.AudioSource, a.cfg.AudioDevice, a.cfg.AudioDeviceMic)
+		if len(caps) > 0 {
+			cfg.AudioRate = caps[0].Fmt.Rate
+			cfg.AudioChannels = caps[0].Fmt.Channels
+			for _, c := range caps {
+				logf("record: audio source=%s device=%s %q (%d Hz, %d ch)", a.cfg.AudioSource, c.DeviceID, c.Name, c.Fmt.Rate, c.Fmt.Channels)
+			}
 		}
 	}
 
@@ -98,9 +100,7 @@ func (a *App) startRecording(region win.RECT, audioMode string) {
 		sw, err = win.NewSinkWriter(path, cfg)
 	}
 	if err != nil {
-		if cap != nil {
-			cap.Close()
-		}
+		closeCaptures(caps)
 		logf("record: sink writer failed: %v", err)
 		a.notify("Запись", "Кодек недоступен: "+err.Error())
 		return
@@ -109,7 +109,7 @@ func (a *App) startRecording(region win.RECT, audioMode string) {
 	r := &Recorder{app: a, region: region, path: path, fps: fps, audio: sw.HasAudio(), sw: sw,
 		cursor: a.cfg.VideoCursor, start: time.Now(), stopCh: make(chan struct{})}
 	a.rec = r
-	if cap == nil && audio {
+	if len(caps) == 0 && audio {
 		a.notify("Запись", "Звук недоступен, записываю без него")
 	}
 	logf("record: start %dx%d fps=%d audio=%v cursor=%v file=%s", w, h, fps, r.audio, r.cursor, path)
@@ -119,9 +119,9 @@ func (a *App) startRecording(region win.RECT, audioMode string) {
 
 	r.wg.Add(1)
 	go r.videoLoop(w, h)
-	if r.audio && cap != nil {
+	if r.audio && len(caps) > 0 {
 		r.wg.Add(1)
-		go r.audioLoop(cap)
+		go r.audioLoop(caps)
 	}
 }
 
@@ -226,24 +226,24 @@ func (r *Recorder) videoLoop(w, h int) {
 	}
 }
 
-// audioLoop records the default playback device and keeps its timeline glued to
-// the video clock (silence is inserted when nothing is playing).
-func (r *Recorder) audioLoop(cap *win.AudioCapture) {
+// audioLoop records one or two sources (system sound and/or microphone) and
+// mixes them into a single PCM stream that stays glued to the video clock.
+func (r *Recorder) audioLoop(caps []*win.AudioCapture) {
 	defer r.wg.Done()
-	defer cap.Close()
+	defer closeCaptures(caps)
 	if !win.ComInit() {
 		logf("record: COM init failed on audio thread")
 		return
 	}
 	defer win.ComUninit()
 
-	rate := cap.Fmt.Rate
-	channels := cap.Fmt.Channels
+	rate := caps[0].Fmt.Rate
+	channels := caps[0].Fmt.Channels
 	bytesPerFrame := channels * 2
-	pending := make([]byte, 0, rate*bytesPerFrame)
-	var written int64 // frames (samples per channel) already sent
-	loud := false
-	warned := false
+	pend := make([][]byte, len(caps))
+	out := make([]byte, rate*bytesPerFrame/2)
+	var written int64
+	loud, warned := false, false
 	ticker := time.NewTicker(15 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -253,38 +253,43 @@ func (r *Recorder) audioLoop(cap *win.AudioCapture) {
 			return
 		case <-ticker.C:
 		}
-		pcm, err := cap.ReadPCM()
-		if err != nil {
-			logf("record: audio read: %v", err)
-			return
-		}
-		pending = append(pending, pcm...)
-		if len(pending) > rate*bytesPerFrame*30 {
-			pending = pending[len(pending)-rate*bytesPerFrame*30:]
+		for i, c := range caps {
+			pcm, err := c.ReadPCM()
+			if err != nil {
+				logf("record: audio read: %v", err)
+				return
+			}
+			pend[i] = append(pend[i], pcm...)
+			if len(pend[i]) > rate*bytesPerFrame*30 {
+				pend[i] = pend[i][len(pend[i])-rate*bytesPerFrame*30:]
+			}
 		}
 
 		elapsedNs := time.Since(r.start).Nanoseconds()
 		want := int64(float64(elapsedNs) / 1e9 * float64(rate))
-		have := int64(len(pending) / bytesPerFrame)
-		if written+have < want {
-			pad := int((want - written - have) * int64(bytesPerFrame))
-			if pad > rate*bytesPerFrame { // never pad more than a second at once
-				pad = rate * bytesPerFrame
-			}
-			pending = append(pending, make([]byte, pad)...)
-			have = int64(len(pending) / bytesPerFrame)
-		}
-		if want <= written || have == 0 {
+		need := (want - written) * int64(bytesPerFrame)
+		if need <= 0 {
 			continue
 		}
-		need := (want - written) * int64(bytesPerFrame)
-		if need > int64(len(pending)) {
-			need = int64(len(pending))
+		if need > int64(rate*bytesPerFrame) { // never burst more than a second
+			need = int64(rate * bytesPerFrame)
 		}
-		chunk := pending[:need]
+		// pad short sources with silence so the mix stays aligned
+		for i := range pend {
+			if int64(len(pend[i])) < need {
+				pend[i] = append(pend[i], make([]byte, need-int64(len(pend[i])))...)
+			}
+		}
+
+		chunk := out[:need]
+		if len(caps) == 1 {
+			copy(chunk, pend[0][:need])
+		} else {
+			mixPCM(chunk, [][]byte{pend[0][:need], pend[1][:need]})
+		}
 		if !loud && hasSignal(chunk) {
 			loud = true
-			logf("record: audio signal detected")
+			logf("record: audio signal detected (%d source(s))", len(caps))
 		}
 		ts := written * hnsPerSecond / int64(rate)
 		dur := int64(len(chunk)/bytesPerFrame) * hnsPerSecond / int64(rate)
@@ -293,12 +298,41 @@ func (r *Recorder) audioLoop(cap *win.AudioCapture) {
 			return
 		}
 		written += int64(len(chunk) / bytesPerFrame)
-		pending = append(pending[:0], pending[need:]...)
+		for i := range pend {
+			pend[i] = append(pend[i][:0], pend[i][need:]...)
+		}
 		r.audioOK.Store(true)
 		if !loud && !warned && time.Since(r.start) > 3*time.Second {
 			warned = true
-			logf("record: WARNING audio is silent so far (device %s) — muted device or nothing playing?", cap.DeviceID)
-			r.app.notify("Звук не пишется", "Похоже, на устройстве воспроизведения тишина. Проверьте, что звук идёт в колонки/наушники.")
+			logf("record: WARNING audio is silent so far (%d source(s)) — muted device or nothing playing?", len(caps))
+			r.app.notify("Звук не пишется", "Похоже, на выбранном устройстве тишина. Проверьте громкость и устройство в меню трея.")
+		}
+	}
+}
+
+// mixPCM averages several PCM16 chunks of equal length into dst.
+func mixPCM(dst []byte, streams [][]byte) {
+	n := len(streams)
+	for i := 0; i+1 < len(dst); i += 2 {
+		sum := 0
+		for _, s := range streams {
+			sum += int(int16(uint16(s[i]) | uint16(s[i+1])<<8))
+		}
+		v := sum / n
+		if v > 32767 {
+			v = 32767
+		} else if v < -32768 {
+			v = -32768
+		}
+		dst[i] = byte(uint16(v))
+		dst[i+1] = byte(uint16(v) >> 8)
+	}
+}
+
+func closeCaptures(caps []*win.AudioCapture) {
+	for _, c := range caps {
+		if c != nil {
+			c.Close()
 		}
 	}
 }
@@ -310,26 +344,41 @@ func (r *Recorder) fail(err error) {
 	})
 }
 
-func openAudioSource(source, deviceFilter string) *win.AudioCapture {
-	ok := make(chan *win.AudioCapture, 1)
+// openAudioSources opens the endpoints for the configured mode. "mix" records
+// system sound and the microphone together, converted to the same 48k stereo
+// format so they can be averaged.
+func openAudioSources(source, device, deviceMic string) []*win.AudioCapture {
+	ok := make(chan []*win.AudioCapture, 1)
 	go func() {
 		if !win.ComInit() {
 			ok <- nil
 			return
 		}
-		var cap *win.AudioCapture
-		var err error
-		if source == "mic" {
-			cap, err = win.OpenMicrophoneAudio(deviceFilter)
-		} else {
-			cap, err = win.OpenLoopbackAudio(deviceFilter)
+		var out []*win.AudioCapture
+		open := func(loopback bool, filter string) {
+			var cap *win.AudioCapture
+			var err error
+			if loopback {
+				cap, err = win.OpenLoopbackAudio48(filter)
+			} else {
+				cap, err = win.OpenMicrophoneAudio48(filter)
+			}
+			if err != nil {
+				logf("record: %s unavailable (filter %q): %v", map[bool]string{true: "loopback", false: "microphone"}[loopback], filter, err)
+				return
+			}
+			out = append(out, cap)
 		}
-		if err != nil {
-			logf("record: audio source %q unavailable: %v", source, err)
-			ok <- nil
-			return
+		switch source {
+		case "mic":
+			open(false, deviceMic)
+		case "mix":
+			open(true, device)
+			open(false, deviceMic)
+		default:
+			open(true, device)
 		}
-		ok <- cap
+		ok <- out
 	}()
 	select {
 	case c := <-ok:

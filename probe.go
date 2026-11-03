@@ -112,6 +112,9 @@ func runMenuDump(app *App) {
 	logf("menu-dump: built menu with %d devices for source=%s device=%q",
 		len(app.menuDevices), app.cfg.AudioSource, app.cfg.AudioDevice)
 	for i, d := range app.menuDevices {
-		logf("menu-dump: device %d = %q %s", i, d.Name, d.ID)
+		logf("menu-dump: system device %d = %q %s", i, d.Name, d.ID)
+	}
+	for i, d := range app.menuMicDevices {
+		logf("menu-dump: mic device %d = %q %s", i, d.Name, d.ID)
 	}
 }
