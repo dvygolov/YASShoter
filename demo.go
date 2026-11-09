@@ -29,8 +29,19 @@ func (a *App) openDemoEditor() {
 	for y := int32(0); y < a.screen.H(); y += 40 {
 		src.Line(0, float64(y), float64(a.screen.W()), float64(y), 1, grid)
 	}
-	src.FillRectColor(win.RECT{60, 60, 520, 260}, 0xDCE7FF)
-	src.FillRectColor(win.RECT{560, 60, 900, 160}, 0xFFE9DC)
+	// detailed content so blur/pixelate are clearly visible
+	for y := int32(60); y < 260; y += 12 {
+		for x := int32(60); x < 520; x += 12 {
+			if ((x/12)+(y/12))%2 == 0 {
+				src.FillRectColor(win.RECT{x, y, x + 12, y + 12}, 0x2F6FEB)
+			}
+		}
+	}
+	for i := int32(0); i < 16; i++ {
+		src.Line(float64(560+i*22), 60, float64(560), float64(60+i*14), 3, 0xE5484D)
+	}
+	src.TextOut("SENSITIVE DATA 1234-5678", &win.RECT{600, 300, 940, 340}, 0x111827,
+		win.CreateFont(26, win.FW_BOLD, "Segoe UI"), win.DT_LEFT|win.DT_VCENTER|win.DT_SINGLELINE)
 	a.src = src
 	region := win.RECT{80, 80, 80 + 900, 80 + 480}
 	logf("demo: opening editor for %dx%d at dpi=%d", region.W(), region.H(),

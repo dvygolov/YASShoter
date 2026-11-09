@@ -16,6 +16,8 @@ const (
 	ToolEllipse
 	ToolPencil
 	ToolNumber
+	ToolBlur
+	ToolPixelate
 )
 
 // Shape is a single annotation. Coordinates are in image pixels.
@@ -31,7 +33,40 @@ type Shape struct {
 	Num   int
 }
 
+// rectOf returns the normalised rectangle covered by a region effect.
+func rectOf(s *Shape) win.RECT {
+	return win.NormalizeRect(int32(s.X0), int32(s.Y0), int32(s.X1), int32(s.Y1))
+}
+
+// blurRadius and pixelBlock derive the effect strength from the pen width, which
+// the toolbar exposes as the strength selector for these two tools.
+func blurRadius(s *Shape) int32 {
+	r := int32(s.Width * 2.5)
+	if r < 6 {
+		r = 6
+	}
+	if r > 60 {
+		r = 60
+	}
+	return r
+}
+
+func pixelBlock(s *Shape) int32 {
+	b := int32(s.Width * 2)
+	if b < 6 {
+		b = 6
+	}
+	if b > 48 {
+		b = 48
+	}
+	return b
+}
+
 func (s *Shape) Bounds() win.RECT {
+	if s.Tool == ToolBlur || s.Tool == ToolPixelate {
+		r := rectOf(s)
+		return win.Inflate(r, 2)
+	}
 	pad := s.Width + 16
 	var minx, miny, maxx, maxy float64
 	if s.Tool == ToolPencil && len(s.Pts) >= 2 {
@@ -71,6 +106,12 @@ func drawShape(d *win.Dib, s *Shape, font win.HFONT) {
 		d.EllipseOutline(cx, cy, rx, ry, s.Width, s.Color)
 	case ToolPencil:
 		d.Polyline(s.Pts, s.Width, s.Color)
+	case ToolBlur:
+		r := rectOf(s)
+		d.Blur(r, blurRadius(s))
+	case ToolPixelate:
+		r := rectOf(s)
+		d.Pixelate(r, pixelBlock(s))
 	case ToolNumber:
 		rad := s.Width*2.4 + 6
 		d.FillCircle(s.X0, s.Y0, rad, s.Color)

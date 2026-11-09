@@ -154,7 +154,7 @@ func (tb *Toolbar) layout() {
 		x += w + tb.gap
 	}
 	tb.btns = tb.btns[:0]
-	for _, t := range []ToolKind{ToolArrow, ToolRect, ToolEllipse, ToolPencil, ToolNumber} {
+	for _, t := range []ToolKind{ToolArrow, ToolRect, ToolEllipse, ToolPencil, ToolNumber, ToolBlur, ToolPixelate} {
 		add(tbButton{kind: tbTool, tool: t}, tb.btn)
 	}
 	sep()
@@ -170,7 +170,7 @@ func (tb *Toolbar) layout() {
 		add(tbButton{kind: tbAction, act: a}, tb.btn)
 	}
 	x += tb.gap
-	tb.w = x + win.Scale(tbDesignHint, tb.dpi) + tb.pad
+	tb.w = x + tb.pad
 }
 
 func (tb *Toolbar) compose() {
@@ -201,13 +201,6 @@ func (tb *Toolbar) compose() {
 	for _, sx := range tb.seps {
 		b.FillRectColor(win.RECT{sx, sepTop, sx + 1, tb.h - sepTop}, 0x3B4250)
 	}
-	// hint text
-	hr := win.RECT{Left: tb.w - win.Scale(tbDesignHint, tb.dpi) - tb.pad, Top: 0, Right: tb.w - tb.pad, Bottom: tb.h}
-	txt := "Enter — сохранить · Esc — отмена"
-	if tb.msg != "" {
-		txt = tb.msg
-	}
-	b.TextOut(txt, &hr, 0x9AA4B2, tb.small, win.DT_RIGHT|win.DT_VCENTER|win.DT_SINGLELINE|win.DT_NOPREFIX|win.DT_END_ELLIPSIS)
 }
 
 func (tb *Toolbar) drawButtonIcon(btn tbButton, r win.RECT, active bool) {
@@ -239,6 +232,27 @@ func (tb *Toolbar) drawButtonIcon(btn tbButton, r win.RECT, active bool) {
 				fx + 1*s, fy + 4*s,
 				fx + 7*s, fy - 6*s,
 			}, stroke, col)
+		case ToolBlur:
+			// smudge: three bars of shrinking width
+			b.Line(fx-7*s, fy-5*s, fx+7*s, fy-5*s, stroke, col)
+			b.Line(fx-5*s, fy, fx+5*s, fy, stroke, col)
+			b.Line(fx-3*s, fy+5*s, fx+3*s, fy+5*s, stroke, col)
+		case ToolPixelate:
+			// mosaic: 3x3 blocks
+			sz := 4 * s
+			for gx := 0; gx < 3; gx++ {
+				for gy := 0; gy < 3; gy++ {
+					if (gx+gy)%2 != 0 {
+						continue
+					}
+					x0 := fx - 1.5*sz + float64(gx)*sz
+					y0 := fy - 1.5*sz + float64(gy)*sz
+					b.FillRectColor(win.RECT{
+						int32(x0 + 1), int32(y0 + 1),
+						int32(x0+sz) - 1, int32(y0+sz) - 1,
+					}, col)
+				}
+			}
 		case ToolNumber:
 			rad := 7 * s
 			b.FillCircle(fx, fy, rad, col)
@@ -339,11 +353,6 @@ func (tb *Toolbar) Invalidate() {
 		tb.compose()
 		tb.hwnd.Invalidate(false)
 	}
-}
-
-func (tb *Toolbar) flashMsg(s string) {
-	tb.msg = s
-	tb.Invalidate()
 }
 
 func (tb *Toolbar) hit(p win.POINT) int {

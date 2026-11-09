@@ -226,6 +226,10 @@ func (ed *Editor) onKey(vk uint32) {
 		ed.setTool(ToolPencil)
 	case win.VK_5:
 		ed.setTool(ToolNumber)
+	case win.VK_6:
+		ed.setTool(ToolBlur)
+	case win.VK_7:
+		ed.setTool(ToolPixelate)
 	case win.VK_OEM_PLUS:
 		ed.setWidth(nextWidth(ed.widthLogical, 1))
 	case win.VK_OEM_MINUS:
@@ -323,6 +327,7 @@ func (ed *Editor) onUp(p win.POINT) {
 		return
 	}
 	ed.shapes = append(ed.shapes, s)
+	logf("editor: shape tool=%d rect=%.0f,%.0f-%.0f,%.0f width=%.1f shapes=%d", s.Tool, s.X0, s.Y0, s.X1, s.Y1, s.Width, len(ed.shapes))
 	ed.invalidateAll()
 }
 
@@ -358,9 +363,7 @@ func (ed *Editor) save() {
 
 func (ed *Editor) copy() {
 	if err := copyToClipboard(ed.rasterImage(), int(ed.w), int(ed.h)); err == nil {
-		if ed.tb != nil {
-			ed.tb.flashMsg("Скопировано в буфер")
-		}
+		ed.app.notify(appTitle, "Скопировано в буфер обмена")
 	}
 }
 
