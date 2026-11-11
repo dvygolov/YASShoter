@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"image"
 	"image/png"
 	"os"
@@ -33,6 +34,8 @@ type App struct {
 
 	taskbarMsg     uint32
 	pendingUpdate  bool
+	keyMu          sync.Mutex
+	keyRing        []string
 	menuDevices    []win.RenderDevice
 	menuMicDevices []win.RenderDevice
 
@@ -116,6 +119,12 @@ func runApp() {
 	app.tray = win.NewTray(hwnd, app.icon, appTitle+" — PrintScreen: захват", win.WM_TRAYICON)
 	app.startUpdateLoop()
 
+	// The hook is re-installed every minute: it puts us back at the head of the
+	// low level hook chain (another app that installed its hook later could
+	// otherwise swallow PrintScreen) and heals a hook Windows may have dropped.
+	win.SetTimer(hwnd, 5, 60*1000)
+	win.SetTimer(hwnd, 7, 3000)
+
 	if demoEditorEnabled() {
 		app.openDemoEditor()
 	}
@@ -155,6 +164,11 @@ func (a *App) registerHotkeys() {
 	} else {
 		logf("keyboard hook installed for %q (mods=%x vk=%x)", a.cfg.Hotkey, a.hotkeyMods, a.hotkeyVK)
 	}
+	// Note: do NOT also RegisterHotKey the same key "for redundancy" - with the
+	// key registered the system consumes it before the low level hook, so the
+	// hook stops seeing PrintScreen at all and every hotkey dies. Reliability
+	// comes from the watchdog reinstall instead.
+
 	// Backup shortcut that never conflicts with the shell.
 	a.altHotkeyID = 2
 	if ok, _ := win.RegisterHotKey(a.hwnd, a.altHotkeyID, win.MOD_CONTROL|win.MOD_ALT|win.MOD_NOREPEAT, win.VK_S); !ok {
@@ -162,40 +176,71 @@ func (a *App) registerHotkeys() {
 	}
 }
 
-// keyFilter swallows the configured hotkeys and arms the capture / recording.
-// Matching is lenient about unexpected modifier bits for the video hotkey: a
-// stuck Win key or a keyboard that reports extra modifiers must not kill it.
+// keyFilter runs inside the low level keyboard hook: it must never block or do
+// I/O (Windows removes hooks whose callback is slow), so it only updates state
+// and posts a message.
+//
+// PrintScreen always does something: Ctrl makes it a recording, everything else
+// is a screenshot. A stray modifier bit therefore can never leave the key dead.
 func (a *App) keyFilter(vk uint32, down bool, mods uint32) bool {
-	// MOD_WIN is ignored on purpose: a stuck Windows key or a keyboard/driver that
-	// reports it spuriously must not disable the hotkeys.
 	const modMask = win.MOD_CONTROL | win.MOD_ALT | win.MOD_SHIFT
-	if vk == win.VK_SNAPSHOT && down {
-		logf("hook: PrintScreen down mods=%#x (video wants %#x, shot wants %#x)", mods, a.videoMods, a.hotkeyMods)
-	}
-
-	if vk == a.videoVK && down && (mods&modMask) == (a.videoMods&modMask) {
-		if a.active {
-			logf("hook: video hotkey ignored, capture in progress")
+	if vk == win.VK_SNAPSHOT {
+		if down {
+			a.noteKeyEvent(mods)
+		}
+		if !down {
 			return true
 		}
-		logf("hook: video hotkey -> recording (rec=%v)", a.rec != nil)
-		a.hwnd.PostMessage(umHotkeyVideo, 0, 0)
+		isVideoKey := vk == a.videoVK && (mods&modMask)&win.MOD_CONTROL != 0
+		isShotKey := vk == a.hotkeyVK && (mods&modMask)&(win.MOD_CONTROL|win.MOD_SHIFT|win.MOD_ALT) == 0
+		if isVideoKey {
+			if a.active || a.rec != nil {
+				// Ctrl+PrintScreen also stops a running recording
+				a.hwnd.PostMessage(umHotkeyVideo, 0, 0)
+				return true
+			}
+			a.hwnd.PostMessage(umHotkeyVideo, 0, 0)
+			return true
+		}
+		if isShotKey || vk == a.hotkeyVK {
+			// falls through here when some modifier is stuck: still a screenshot
+			if !a.active && a.rec == nil {
+				a.hwnd.PostMessage(umHotkeyShot, 0, 0)
+			}
+			return true
+		}
 		return true
 	}
-	if vk == a.videoVK && (mods&modMask) == (a.videoMods&modMask) {
-		return true // swallow the key up as well
+	if vk == a.videoVK && (mods&modMask)&win.MOD_CONTROL != 0 {
+		return true
 	}
+	return false
+}
 
-	if vk != a.hotkeyVK || (mods&modMask) != (a.hotkeyMods&modMask) {
-		return false
+// noteKeyEvent keeps a small in-memory ring of hotkey presses. The hook cannot
+// write to the log itself, so the UI thread flushes it later.
+func (a *App) noteKeyEvent(mods uint32) {
+	a.keyMu.Lock()
+	a.keyRing = append(a.keyRing, fmt.Sprintf("%s mods=%#x", time.Now().Format("15:04:05.000"), mods))
+	if len(a.keyRing) > 16 {
+		a.keyRing = a.keyRing[len(a.keyRing)-16:]
 	}
-	if down {
-		if a.active {
-			return true // already capturing: ignore the repeat
-		}
-		a.hwnd.PostMessage(umHotkeyShot, 0, 0)
+	a.keyMu.Unlock()
+}
+
+// flushKeyRing writes buffered hotkey events to the log (UI thread only).
+func (a *App) flushKeyRing() {
+	a.keyMu.Lock()
+	if len(a.keyRing) == 0 {
+		a.keyMu.Unlock()
+		return
 	}
-	return true
+	lines := a.keyRing
+	a.keyRing = nil
+	a.keyMu.Unlock()
+	for _, l := range lines {
+		logf("hook: PrintScreen %s", l)
+	}
 }
 
 func parseHotkey(s string) (uint32, uint32) {
@@ -228,14 +273,17 @@ func parseHotkey(s string) (uint32, uint32) {
 func (a *App) wndProc(hwnd win.HWND, msg uint32, wp, lp uintptr) uintptr {
 	switch msg {
 	case win.WM_HOTKEY:
-		if !a.active {
+		logf("hotkey: WM_HOTKEY id=%d (RegisterHotKey path)", wp)
+		if !a.active && a.rec == nil {
 			a.startCapture(modeShot)
 		}
 		return 0
 	case umHotkeyShot:
+		a.flushKeyRing()
 		a.startCapture(modeShot)
 		return 0
 	case umHotkeyVideo:
+		a.flushKeyRing()
 		a.toggleRecording()
 		return 0
 	case umProbeDone:
@@ -265,6 +313,16 @@ func (a *App) wndProc(hwnd win.HWND, msg uint32, wp, lp uintptr) uintptr {
 		}
 		if wp == 3 {
 			a.requestUpdateCheck(false)
+		}
+		if wp == 7 {
+			a.flushKeyRing()
+		}
+		if wp == 5 {
+			if !a.active && a.rec == nil {
+				if !win.ReinstallKeyboardHook() {
+					logf("hook: watchdog reinstall FAILED")
+				}
+			}
 		}
 		if wp == 1 {
 			win.KillTimer(hwnd, 1)

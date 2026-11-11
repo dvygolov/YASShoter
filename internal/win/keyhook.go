@@ -4,6 +4,7 @@ package win
 
 import (
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -50,8 +51,15 @@ var (
 	trackedCtrl, trackedAlt, trackedShift, trackedWin bool
 )
 
+var modEventAt int64 // unix nano of the last modifier key event we saw
+
 // TrackModifier updates the tracked modifier state from a keyboard event.
 func TrackModifier(vk uint32, down bool) {
+	switch vk {
+	case VK_CONTROL, VK_LCONTROL, VK_RCONTROL, VK_MENU, VK_LMENU, VK_RMENU,
+		VK_SHIFT, VK_LSHIFT, VK_RSHIFT, VK_LWIN, VK_RWIN:
+		modEventAt = time.Now().UnixNano()
+	}
 	switch vk {
 	case VK_CONTROL, VK_LCONTROL, VK_RCONTROL:
 		trackedCtrl = down
@@ -91,6 +99,50 @@ func TrackedModifiers() uint32 {
 	return m
 }
 
+// ResyncModifiers clears tracked bits that the OS says are released. If a key up
+// event is ever missed (window switch, input grabbed by another app, the hook
+// being dropped for a moment), the tracked state would stay stuck forever and
+// e.g. Ctrl+PrintScreen would look like Ctrl+Alt+PrintScreen. Every new key down
+// heals it.
+func ResyncModifiers() {
+	// Never trust the async state right after a modifier event: GetAsyncKeyState
+	// can lag behind (or not see injected keys) and would drop a legitimately
+	// held Ctrl, turning Ctrl+PrintScreen into a plain screenshot.
+	if time.Since(time.Unix(0, modEventAt)) < 2*time.Second {
+		return
+	}
+	if trackedCtrl && !keyDown(VK_CONTROL) {
+		trackedCtrl = false
+	}
+	if trackedAlt && !keyDown(VK_MENU) {
+		trackedAlt = false
+	}
+	if trackedShift && !keyDown(VK_SHIFT) {
+		trackedShift = false
+	}
+	if trackedWin && !keyDown(VK_LWIN) && !keyDown(VK_RWIN) {
+		trackedWin = false
+	}
+}
+
+// ReinstallKeyboardHook replaces the hook. Windows silently removes low level
+// hooks whose callback is too slow, so a periodic reinstall is a cheap safety net.
+func ReinstallKeyboardHook() bool {
+	// Install the new hook first: it becomes the head of the hook chain and if
+	// the call fails we still have the previous one working.
+	h, _, _ := pSetWindowsHookExW.Call(WH_KEYBOARD_LL, keyHookProc, uintptr(GetModuleHandle()), 0)
+	if h == 0 {
+		return false
+	}
+	old := hookHandle
+	hookHandle = h
+	if old != 0 && old != h {
+		pUnhookWinEvent.Call(old)
+	}
+	SeedModifiers()
+	return true
+}
+
 // SeedModifiers initialises the tracked state from the current keyboard state so
 // a modifier that was already held when the hook started is not missed.
 func SeedModifiers() {
@@ -105,8 +157,10 @@ func keyboardProc(nCode int32, wparam, lparam uintptr) uintptr {
 		kb := (*KBDLLHOOKSTRUCT)(unsafe.Pointer(lparam))
 		down := wparam == WM_KEYDOWN_ || wparam == WM_SYSKEYDOWN_
 		TrackModifier(kb.VkCode, down)
-		// union of the tracked state and the async one: whichever is ahead wins
-		mods := TrackedModifiers() | Modifiers()
+		if down {
+			ResyncModifiers()
+		}
+		mods := TrackedModifiers()
 		if keyFilter(kb.VkCode, down, mods) {
 			return 1 // swallowed
 		}
