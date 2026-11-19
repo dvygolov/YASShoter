@@ -125,6 +125,43 @@ func ResyncModifiers() {
 	}
 }
 
+const (
+	EVENT_SYSTEM_FOREGROUND = 0x0003
+	WINEVENT_OUTOFCONTEXT   = 0x0000
+	WINEVENT_SKIPOWNPROCESS = 0x0002
+)
+
+var (
+	pSetWinEventHook   = dllUser32.NewProc("SetWinEventHook")
+	pUnhookWinEventEx  = dllUser32.NewProc("UnhookWinEvent")
+	winEventHook       uintptr
+	onForegroundChange func()
+	winEventProc       = syscall.NewCallback(func(hHook, event, hwnd, idObject, idChild, thread, ms uintptr) uintptr {
+		if event == EVENT_SYSTEM_FOREGROUND && onForegroundChange != nil {
+			onForegroundChange()
+		}
+		return 0
+	})
+)
+
+// InstallForegroundWatcher calls fn whenever another window becomes foreground.
+// Layout switchers and similar tools re-arm their keyboard hook on focus change
+// and then sit in front of ours; reacting to the same event keeps us first.
+func InstallForegroundWatcher(fn func()) bool {
+	onForegroundChange = fn
+	h, _, _ := pSetWinEventHook.Call(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
+		0, winEventProc, 0, 0, WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS)
+	winEventHook = h
+	return h != 0
+}
+
+func RemoveForegroundWatcher() {
+	if winEventHook != 0 {
+		pUnhookWinEventEx.Call(winEventHook)
+		winEventHook = 0
+	}
+}
+
 // ReinstallKeyboardHook replaces the hook. Windows silently removes low level
 // hooks whose callback is too slow, so a periodic reinstall is a cheap safety net.
 func ReinstallKeyboardHook() bool {

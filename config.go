@@ -33,12 +33,15 @@ type Config struct {
 	// empty means the system default playback device.
 	AudioDevice string `json:"audioDevice"`
 	// AudioDeviceMic is the recording endpoint used for the microphone source.
-	AudioDeviceMic  string `json:"audioDeviceMic"`
-	AutoStart       bool   `json:"autoStart"`
-	CopyToClipboard bool   `json:"copyToClipboard"`
-	DisableSnipping bool   `json:"disableSnippingToolPrintScreen"`
-	DimAlpha        int    `json:"dimAlpha"`
-	TrayPromoted    bool   `json:"trayPromoted"`
+	AudioDeviceMic string `json:"audioDeviceMic"`
+	AutoStart      bool   `json:"autoStart"`
+	// AutoStartViaTask means autostart runs through a scheduled task with
+	// highest privileges (needed so the keyboard hook also works in admin windows)
+	AutoStartViaTask bool `json:"autoStartViaTask"`
+	CopyToClipboard  bool `json:"copyToClipboard"`
+	DisableSnipping  bool `json:"disableSnippingToolPrintScreen"`
+	DimAlpha         int  `json:"dimAlpha"`
+	TrayPromoted     bool `json:"trayPromoted"`
 	// AutoUpdate: "auto" — скачивать и обновляться самому, "notify" — только
 	// сообщать о новой версии, "off" — не проверять.
 	AutoUpdate       string `json:"autoUpdate"`

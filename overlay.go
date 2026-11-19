@@ -112,6 +112,11 @@ func (o *Overlay) show(mode overlayMode, audio string) {
 	o.drawnLb = win.RECT{}
 	o.dragging = false
 	o.undimmed = true
+	// put the overlay at the top of the topmost band every time: a topmost window
+	// that appeared after ours (an always-on-top player, the taskbar) would
+	// otherwise stay above it and the user would see nothing
+	o.hwnd.SetPos(win.HWND_TOPMOST, o.app.screen.Left, o.app.screen.Top,
+		o.app.screen.W(), o.app.screen.H(), win.SWP_SHOWWINDOW|win.SWP_NOACTIVATE)
 	o.hwnd.Show(win.SW_SHOW)
 	win.ForceForeground(o.hwnd)
 	o.updateHover(win.GetCursorPos())
