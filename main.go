@@ -81,7 +81,6 @@ const (
 	cmdDeviceDefault    = 15
 	cmdAudioMix         = 16
 	cmdDeviceMicDefault = 17
-	cmdElevate          = 18
 
 	// device menu items live in these id ranges
 	cmdDeviceBase    = 200
@@ -100,7 +99,7 @@ func runApp() {
 	if cfg.DisableSnipping {
 		win.DisableSnippingToolPrintScreen()
 	}
-	logf("startup: saveDir=%s hotkey=%s", cfg.SaveDir, cfg.Hotkey)
+	logf("startup: saveDir=%s hotkey=%s elevated=%v", cfg.SaveDir, cfg.Hotkey, win.SelfElevated())
 
 	name := "YASShoterHost"
 	win.RegisterClass(name, 0)
@@ -264,7 +263,7 @@ func (a *App) checkForegroundElevation() {
 	}
 	logf("elevation: foreground %q runs elevated, our hook cannot see its keys", name)
 	a.notify("PrintScreen не сработает",
-		"Это окно запущено от администратора, а YASShoter — нет. Меню трея → «Работать от администратора».")
+		"Это окно запущено от администратора, а YASShoter — нет. Запустите YASShoter от имени администратора.")
 }
 
 // noteRearm logs hook re-arms at most once every 10 seconds.
@@ -527,11 +526,6 @@ func (a *App) buildTrayMenu() *win.Menu {
 	}
 
 	m.Add(cmdCursorOn, "Показывать курсор", a.cfg.VideoCursor)
-	if win.SelfElevated() {
-		m.Add(cmdElevate, "Работает от администратора ✓", true)
-	} else {
-		m.Add(cmdElevate, "Работать от администратора (для админ-окон)…", false)
-	}
 	m.Separator()
 	m.Add(cmdFolder, "Открыть папку сохранения", false)
 	m.Add(cmdConfig, "Настройки (config.json)", false)
@@ -705,41 +699,6 @@ func probeCapture(cap *win.AudioCapture, dur time.Duration) int {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return peak
-}
-
-// elevateSelf registers an elevated autostart task and restarts the app with
-// administrator rights. One UAC confirmation, then Windows starts us elevated at
-// every logon without a prompt - that is the only way a keyboard hook can see
-// keys while an elevated window is focused.
-func (a *App) elevateSelf() {
-	if win.SelfElevated() {
-		a.notify(appTitle, "Уже работаем от администратора")
-		return
-	}
-	exe := win.ExePath()
-	if exe == "" {
-		return
-	}
-	// /rl highest => the task starts us elevated at logon, no UAC prompt
-	args := `/create /tn YASShoter /tr "\"` + exe + `\"" /sc onlogon /rl highest /f`
-	systemRoot := os.Getenv("SystemRoot")
-	if systemRoot == "" {
-		systemRoot = `C:\Windows`
-	}
-	schtasks := filepath.Join(systemRoot, "System32", "schtasks.exe")
-	if win.ShellExecuteOK("runas", schtasks, args, "", win.SW_SHOWNORMAL) {
-		logf("elevation: scheduled task requested")
-		a.cfg.AutoStartViaTask = true
-		a.cfg.save()
-		// the Run key would start a second, non-elevated copy
-		win.DeleteRunKey(appName)
-		// restart this instance elevated so the hook can see admin windows now
-		win.ShellExecute("runas", exe, "", filepath.Dir(exe), win.SW_SHOWNORMAL)
-		a.hwnd.PostMessage(win.WM_CLOSE, 0, 0)
-		return
-	}
-	logf("elevation: runas cancelled")
-	a.notify(appTitle, "Отмена: без прав администратора PrintScreen не видит клавиши в админ-окнах")
 }
 
 // toggleRecording starts the video overlay or stops an active recording.
